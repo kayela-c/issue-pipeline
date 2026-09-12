@@ -1,0 +1,19 @@
+# Single Netlify config for the monorepo, at the repository root.
+#
+# The CLI resolves `publish` and `functions` from the repository root even when
+# `--filter` names a workspace package, so these paths are written root-relative
+# and the site is deployed with no base directory set.
+
+[build]
+  # No bundling step of our own: Netlify bundles the functions from TypeScript
+  # source. The only prerequisite is the compiled shared contract package.
+  command = "pnpm --filter @issue-pipeline/shared build"
+  publish = "apps/api/public"
+  functions = "apps/api/netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[dev]
+  framework = "#static"
+  publish = "apps/api/public"

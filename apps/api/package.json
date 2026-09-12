@@ -1,0 +1,29 @@
+{
+  "name": "@issue-pipeline/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm -w run dev:api",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0",
+    "@issue-pipeline/shared": "workspace:*",
+    "@neondatabase/serverless": "^1.1.0",
+    "drizzle-orm": "^0.45.2",
+    "zod": "^4.6.2"
+  },
+  "devDependencies": {
+    "@netlify/functions": "^6.0.0",
+    "@types/node": "^22.10.0",
+    "drizzle-kit": "^0.31.10",
+    "typescript": "~6.0.3",
+    "vitest": "^5.0.0"
+  }
+}

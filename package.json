@@ -1,0 +1,31 @@
+{
+  "name": "issue-pipeline",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.1.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "dev:api": "pnpm --filter @issue-pipeline/shared build && netlify dev --filter @issue-pipeline/api",
+    "dev:desktop": "pnpm --filter @issue-pipeline/desktop tauri dev",
+    "db:generate": "pnpm --filter @issue-pipeline/api db:generate",
+    "db:migrate": "pnpm --filter @issue-pipeline/api db:migrate"
+  },
+  "devDependencies": {
+    "netlify-cli": "^27.5.2",
+    "typescript": "~6.0.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "netlify-cli",
+      "sharp",
+      "unix-dgram"
+    ]
+  }
+}
