@@ -1,0 +1,133 @@
+name: Feature / Task issue template
+about: Submit a detailed issue for a feature or task that Claude Code can implement.
+title: "[TYPE]: "
+labels: ""
+assignees: ""
+body:
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Issue type
+      options:
+        - "🔧 Feature"
+        - "🐛 Bug"
+        - "🔁 Refactor"
+        - "📋 Task / Chore"
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 2–3 sentences. What needs to happen and why.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context & background
+      description: Where does this fit in the system? Which agent, module, workflow, or service is this part of? Give Claude Code enough context to understand scope without reading the whole codebase.
+    validations:
+      required: true
+
+  - type: textarea
+    id: files-affected
+    attributes:
+      label: Files / components affected
+      description: List known files, classes, routes, DB tables, or services involved. If unknown, describe the area (e.g. "queue layer", "Filament admin panel").
+      placeholder: |
+        - app/Agents/AgentOrchestrator.php
+        - routes/api.php
+        - database/migrations/
+    validations:
+      required: false
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies / blockers
+      description: Other issues, PRs, environment variables, or external services this requires.
+      placeholder: |
+        - Blocked by #42 (Redis queue setup)
+        - Requires env var ANTHROPIC_API_KEY
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria - claude add as many as needed
+      description: Each item must be specific and testable. Claude Code will use these to validate its plan.
+      placeholder: |
+        - [ ] Criterion one — specific, testable outcome
+        - [ ] Criterion two — another measurable requirement
+        - [ ] Criterion three — edge case or error state handled
+    validations:
+      required: false
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Technical constraints
+      description: Stack requirements, libraries to use or avoid, patterns to follow, things NOT to do.
+      placeholder: |
+        - Must use existing Redis queue (no new queue drivers)
+        - Do not modify the Filament admin panel layout
+        - Follow existing service class pattern in app/Services/
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What the system should do when working correctly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current behavior (bugs only)
+      description: What actually happens. Paste error messages, stack traces, or logs here.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - "🔴 High"
+        - "🟡 Medium"
+        - "🟢 Low"
+    validations:
+      required: true
+
+  - type: input
+    id: effort
+    attributes:
+      label: Effort estimate
+      description: Rough time estimate.
+      placeholder: "e.g. ~2h, ~1 day"
+    validations:
+      required: false
+
+  - type: input
+    id: agent-area
+    attributes:
+      label: Agent / area
+      description: Which agent or area of the system does this belong to?
+      placeholder: "e.g. Market Research Agent, Filament Admin, Queue Layer"
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Links to docs, Loom recordings, ClickUp tasks, related issues, design references, or CLAUDE.md conventions to follow.
+    validations:
+      required: false
