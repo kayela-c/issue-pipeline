@@ -13,8 +13,8 @@ Full design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Layout
 
 ```
-apps/desktop      Tauri 2 + React client (the only thing teammates install)
-apps/api          Netlify Functions -- Neon Postgres, Gitea, Anthropic
+apps/web          React SPA (Vite), served by the same Netlify site as the API
+apps/api          Netlify Functions -- auth, Neon Postgres, Gitea, Anthropic
 packages/shared   zod schemas + types: the API contract, built to dist/
 scripts           Python utilities (seeding, smoke tests)
 netlify.toml      site config; lives at the root, see "Gotchas"
@@ -23,23 +23,19 @@ netlify.toml      site config; lives at the root, see "Gotchas"
 ## Prerequisites
 
 - Node 20+ and pnpm 10
-- Rust stable, **plus the MSVC toolchain on Windows** — Visual Studio's
-  "Desktop development with C++" workload. Without it `cargo` cannot link and
-  the desktop app will not build.
 - A `.env` at the repository root; copy `.env.example` and fill it in.
+- A Gitea OAuth2 application registered as a **confidential** client with the
+  redirect URI `http://localhost:8888/api/auth/callback`.
 
 ## Running it
 
 ```sh
 pnpm install
-
-# API on http://localhost:8888 (also compiles packages/shared first)
-pnpm dev:api
-curl http://localhost:8888/api/health     # -> {"db":"ok","now":...,"version":"dev"}
-
-# Desktop app (needs the MSVC toolchain)
-pnpm dev:desktop
+pnpm dev          # SPA + API on http://localhost:8888 (builds packages/shared first)
 ```
+
+Open **http://localhost:8888** — not Vite's own port 5173. Only 8888 serves the
+functions, and it is the origin registered for the OAuth redirect.
 
 Useful checks:
 
@@ -48,7 +44,11 @@ pnpm -r typecheck
 pnpm -r test
 pnpm db:generate        # generate a migration from src/db/schema.ts
 pnpm db:migrate         # apply migrations to $DATABASE_URL
+curl http://localhost:8888/api/health
 ```
+
+Scripts and tests can call the API without a browser by sending a Gitea
+personal access token as `Authorization: Bearer <token>`.
 
 ## Gotchas
 
@@ -60,12 +60,21 @@ pnpm db:migrate         # apply migrations to $DATABASE_URL
 - **`packages/shared` is consumed as built JavaScript** (`dist/`), not as
   TypeScript source. Netlify's bundler leaves `node_modules` packages external,
   and Node's TypeScript support will not resolve extensionless or `.js`
-  specifiers to `.ts` files. `pnpm dev:api` rebuilds it; use
+  specifiers to `.ts` files. `pnpm dev` rebuilds it; use
   `pnpm --filter @issue-pipeline/shared dev` to watch it while editing.
+- **A stale `netlify dev` keeps port 8888.** A new one then fails with "Could
+  not acquire required 'port'" while requests silently hit the old server. Stop
+  the old process first.
+- **One function per auth route.** For cross-origin requests `netlify dev`
+  retries the path with `/index.html` appended, so a function that routes on
+  `pathname` misroutes them. Keep routing in `config.path`.
+- **The Content Security Policy for scripts is added at build time only**
+  (`apps/web/vite.config.ts`); Vite's dev server needs inline scripts.
 
 ## Security
 
-Tokens live in the OS keychain and are handled only by Rust; the React layer
-never sees one. No database credentials or AI keys ship in the installer — the
-desktop app talks only to the API, which holds them. See section 10 of the
-architecture doc for the full checklist.
+The browser never holds a Gitea token. Sign-in is a server-side OAuth flow, and
+the session lives in an AES-256-GCM encrypted `HttpOnly` cookie that the API
+decrypts per request. State-changing requests must come from this site's own
+origin. No database credentials or API keys reach the browser. See section 10 of
+the architecture doc for the full checklist.

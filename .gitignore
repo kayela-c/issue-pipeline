@@ -20,13 +20,6 @@ dist-ssr
 # Netlify
 .netlify/
 
-# Rust / Tauri build output
-target/
-apps/desktop/src-tauri/gen/
-
-# Release artifacts are published to the downloads site, never committed
-release/
-
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

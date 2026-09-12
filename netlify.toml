@@ -3,17 +3,51 @@
 # The CLI resolves `publish` and `functions` from the repository root even when
 # `--filter` names a workspace package, so these paths are written root-relative
 # and the site is deployed with no base directory set.
+#
+# One site serves both the React SPA (static) and the API (functions), so the
+# browser talks to a single origin: no CORS, and the session cookie is
+# first-party.
 
 [build]
-  # No bundling step of our own: Netlify bundles the functions from TypeScript
-  # source. The only prerequisite is the compiled shared contract package.
-  command = "pnpm --filter @issue-pipeline/shared build"
-  publish = "apps/api/public"
+  # Functions are bundled by Netlify from TypeScript source; the SPA is built by
+  # Vite. Both depend on the compiled shared contract package.
+  command = "pnpm --filter @issue-pipeline/shared build && pnpm --filter @issue-pipeline/web build"
+  publish = "apps/web/dist"
   functions = "apps/api/netlify/functions"
 
 [functions]
   node_bundler = "esbuild"
 
 [dev]
-  framework = "#static"
-  publish = "apps/api/public"
+  # `netlify dev` fronts Vite on :8888 alongside the functions. Always browse
+  # http://localhost:8888 -- that is the registered OAuth redirect origin.
+  framework = "#custom"
+  command = "pnpm --filter @issue-pipeline/web dev"
+  targetPort = 5173
+  port = 8888
+  autoLaunch = false
+
+# Functions with a config.path take precedence over these rules. Any other
+# /api/* path is a JSON 404, never the SPA shell.
+[[redirects]]
+  from = "/api/*"
+  to = "/api-not-found.json"
+  status = 404
+  # Forced: otherwise the SPA shell (and Vite, in dev) "matches" first.
+  force = true
+
+# Client-side routes (/login, /board, ...) all serve the SPA shell.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Headers that are safe in development too. The script/style/connect policy is
+# injected as a <meta> tag at build time only (see apps/web/vite.config.ts),
+# because Vite's dev server relies on inline scripts for hot reload.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"

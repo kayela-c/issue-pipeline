@@ -11,8 +11,7 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "dev:api": "pnpm --filter @issue-pipeline/shared build && netlify dev --filter @issue-pipeline/api",
-    "dev:desktop": "pnpm --filter @issue-pipeline/desktop tauri dev",
+    "dev": "pnpm --filter @issue-pipeline/shared build && netlify dev --filter @issue-pipeline/api",
     "db:generate": "pnpm --filter @issue-pipeline/api db:generate",
     "db:migrate": "pnpm --filter @issue-pipeline/api db:migrate"
   },
