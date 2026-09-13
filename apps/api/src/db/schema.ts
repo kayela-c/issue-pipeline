@@ -62,6 +62,8 @@ export const repoSnapshots = pgTable(
     /** [{ path, size }] after filtering. */
     tree: jsonb("tree").notNull(),
     readme: text("readme"),
+    /** ROUTING.md at the repository root: the map of where each area of the system lives. */
+    routing: text("routing"),
     /** Issue templates as they existed at this commit. */
     templates: jsonb("templates").notNull().default(sql`'[]'::jsonb`),
     /** [{ id, name }] */

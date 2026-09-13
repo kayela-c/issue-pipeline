@@ -56,6 +56,42 @@ describe("GiteaForge", () => {
     await expect(forge.getCurrentUser()).rejects.toMatchObject({ status: 500, retryable: true });
   });
 
+  it("pages a recursive tree until Gitea stops reporting truncation, keeping only blobs", async () => {
+    const { forge, fetch } = forgeWith([
+      jsonResponse({ truncated: true, tree: [{ path: "src", type: "tree", size: 0 }, { path: "src/a.ts", type: "blob", size: 5 }] }),
+      jsonResponse({ truncated: false, tree: [{ path: "lib", type: "commit" }, { path: "README.md", type: "blob", size: 9 }] }),
+    ]);
+    await expect(forge.getTree("o", "r", "abc")).resolves.toEqual([
+      { path: "src/a.ts", size: 5 },
+      { path: "README.md", size: 9 },
+    ]);
+    const urls = fetch.mock.calls.map((c) => (c as unknown as [string])[0]);
+    expect(urls[0]).toBe("https://git.example.com/api/v1/repos/o/r/git/trees/abc?recursive=true&page=1&per_page=1000");
+    expect(urls[1]).toContain("page=2");
+  });
+
+  it("encodes raw file paths per segment and pins the ref", async () => {
+    const { forge, fetch } = forgeWith([new Response("hello", { status: 200 })]);
+    await expect(forge.getRawFile("o", "r", "src/my file#1.ts", "sha1")).resolves.toBe("hello");
+    expect((fetch.mock.calls[0] as unknown as [string])[0]).toBe(
+      "https://git.example.com/api/v1/repos/o/r/raw/src/my%20file%231.ts?ref=sha1",
+    );
+  });
+
+  it("merges org labels under repo labels and tolerates user-owned repos", async () => {
+    const { forge } = forgeWith([
+      jsonResponse([{ id: 1, name: "bug" }]),
+      jsonResponse([{ id: 9, name: "bug" }, { id: 10, name: "org-only" }]),
+    ]);
+    await expect(forge.listLabels("TrueRoster", "app")).resolves.toEqual([
+      { id: 1, name: "bug" },
+      { id: 10, name: "org-only" },
+    ]);
+
+    const user = forgeWith([jsonResponse([{ id: 1, name: "bug" }]), jsonResponse({ message: "not found" }, 404)]);
+    await expect(user.forge.listLabels("kayela", "app")).resolves.toEqual([{ id: 1, name: "bug" }]);
+  });
+
   it("treats only a direct 204 as org membership", async () => {
     for (const [status, member] of [[204, true], [302, false], [404, false], [403, false]] as const) {
       const { forge, fetch } = forgeWith([new Response(null, { status })]);

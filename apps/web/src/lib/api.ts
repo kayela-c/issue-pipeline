@@ -1,12 +1,24 @@
-import type { z } from "zod";
 import {
   apiErrorSchema,
+  createRawIssueResponseSchema,
+  draftListResponseSchema,
+  giteaRepoListResponseSchema,
   healthResponseSchema,
   meResponseSchema,
+  repoListResponseSchema,
+  repoSchema,
+  runListResponseSchema,
+  runResponseSchema,
   type ApiErrorCode,
+  type Draft,
+  type GiteaRepo,
   type HealthResponse,
   type MeResponse,
+  type Repo,
+  type RunResponse,
+  type RunSummary,
 } from "@issue-pipeline/shared";
+import { z } from "zod";
 
 /**
  * Typed wrapper around same-origin fetch.
@@ -80,6 +92,39 @@ export function getHealth(): Promise<HealthResponse> {
 
 export function getMe(): Promise<MeResponse> {
   return request("GET", "/api/me", meResponseSchema);
+}
+
+export async function listRepos(): Promise<Repo[]> {
+  return (await request("GET", "/api/repos", repoListResponseSchema)).repos;
+}
+
+export async function searchGiteaRepos(query: string): Promise<GiteaRepo[]> {
+  const q = encodeURIComponent(query);
+  return (await request("GET", `/api/gitea/repos?q=${q}`, giteaRepoListResponseSchema)).repos;
+}
+
+export function trackRepo(owner: string, name: string): Promise<Repo> {
+  return request("POST", "/api/repos", repoSchema, { owner, name });
+}
+
+export async function createRawIssue(repoId: string, body: string): Promise<string> {
+  return (await request("POST", "/api/raw-issues", createRawIssueResponseSchema, { repo_id: repoId, body })).run_id;
+}
+
+export async function listRuns(): Promise<RunSummary[]> {
+  return (await request("GET", "/api/runs?limit=100", runListResponseSchema)).runs;
+}
+
+export function getRun(runId: string): Promise<RunResponse> {
+  return request("GET", `/api/runs/${encodeURIComponent(runId)}`, runResponseSchema);
+}
+
+export async function retryRun(runId: string): Promise<void> {
+  await request("POST", `/api/runs/${encodeURIComponent(runId)}/retry`, z.object({ run_id: z.uuid() }), {});
+}
+
+export async function listRunDrafts(runId: string): Promise<Draft[]> {
+  return (await request("GET", `/api/drafts?run_id=${encodeURIComponent(runId)}`, draftListResponseSchema)).drafts;
 }
 
 export async function logout(): Promise<void> {

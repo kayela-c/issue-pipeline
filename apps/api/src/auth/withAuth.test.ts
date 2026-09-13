@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Context } from "@netlify/functions";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { User } from "../db/users";
+import { fakeForge } from "../forge/fake";
 import { ForgeError, type ForgeClient } from "../forge/types";
 import type { TokenResult } from "./oauth";
 import { SESSION_COOKIE, seal, sessionSchema, unseal, type Keyring, type Session } from "./session";
@@ -38,11 +39,11 @@ function makeDeps(overrides: { forge?: Partial<ForgeClient>; refresh?: () => Pro
   const deps = {
     createForge: (token: string) => {
       tokensSeen.push(token);
-      return {
+      return fakeForge({
         getCurrentUser: async () => ({ id: 7, username: "kayela", fullName: "Kayela" }),
         isOrgMember: async () => true,
         ...overrides.forge,
-      };
+      });
     },
     upsertUser: vi.fn(async () => user),
     allowedOrg: () => "TrueRoster",

@@ -86,10 +86,12 @@ issue-pipeline/
 |       |   +-- auth/withAuth.ts     # session-or-bearer wrapper, refresh, org gate
 |       |   +-- forge/types.ts       # ForgeClient interface
 |       |   +-- forge/gitea.ts       # Gitea implementation
-|       |   +-- llm/anthropic.ts     # thin SDK wrapper, tool-use JSON output
+|       |   +-- llm/anthropic.ts     # thin SDK wrapper, structured-output JSON
 |       |   +-- pipeline/draft.ts    # Stage 1
 |       |   +-- pipeline/post.ts     # Stage 2
 |       |   +-- pipeline/graph.ts    # cycle detection, topo helpers
+|       |   +-- pipeline/templates.ts # issue template discovery + parsing
+|       |   +-- pipeline/validate.ts # AI output validation + sanitizing
 |       +-- prompts/                 # versioned prompts as TS string modules
 |       +-- drizzle/                 # generated migrations
 |       +-- drizzle.config.ts
@@ -139,6 +141,7 @@ CREATE TABLE repo_snapshots (
   commit_sha  text NOT NULL,
   tree        jsonb NOT NULL,                 -- [{path, size}] after filtering
   readme      text,
+  routing     text,                           -- ROUTING.md at root, null when absent
   templates   jsonb NOT NULL DEFAULT '[]',    -- issue templates at this commit
   labels      jsonb NOT NULL DEFAULT '[]',    -- [{id, name}]
   created_at  timestamptz NOT NULL DEFAULT now(),
@@ -251,16 +254,19 @@ Zero rows means the draft is not approved, has unposted dependencies, or was cla
 
 ## 5. API (Netlify Functions, TypeScript)
 
-**Stack:** Netlify Functions v2 (`export default async (req, context)` with `export const config = { path }`), Drizzle ORM over `@neondatabase/serverless` (HTTP driver), `zod` for every request and AI output, `@anthropic-ai/sdk`. Session encryption uses `node:crypto` (no extra dependency). No web framework. Use single statements where possible and `db.batch([...])` for multi-statement atomic writes.
+**Stack:** Netlify Functions v2 (`export default async (req, context)` with `export const config = { path }`), Drizzle ORM over `@neondatabase/serverless` (HTTP driver), `zod` for every request and AI output, `@anthropic-ai/sdk`, and `yaml` for issue templates (approved 2026-09-12). Session encryption uses `node:crypto` (no extra dependency). No web framework. Use single statements where possible and `db.batch([...])` for multi-statement atomic writes.
 
 ### Environment variables (Netlify)
 
 | Name | Purpose |
 |---|---|
 | `DATABASE_URL` | Neon connection string |
+| `LLM_PROVIDER` | `anthropic` (default), `gemini`, or `lmstudio` (local development only). Selected by env var only: keys never pass through the UI |
 | `ANTHROPIC_API_KEY` | Stage 1 only |
-| `MODEL_SELECT` | File-selection model, default `claude-haiku-4-5-20251001` |
-| `MODEL_DRAFT` | Drafting model, default `claude-sonnet-5` |
+| `ANTHROPIC_MODEL_SELECT`, `ANTHROPIC_MODEL_DRAFT` | Anthropic models, default `claude-haiku-4-5-20251001` / `claude-sonnet-5` |
+| `GOOGLE_API_KEY`, `GEMINI_MODEL_SELECT`, `GEMINI_MODEL_DRAFT` | Gemini API (REST `generateContent` with `responseJsonSchema`, no SDK), default `gemini-3.5-flash-lite` / `gemini-3.8-flash` |
+| `LMSTUDIO_BASE_URL`, `LMSTUDIO_MODEL_SELECT`, `LMSTUDIO_MODEL_DRAFT`, `LMSTUDIO_CONTEXT_TOKENS`, `LMSTUDIO_MAX_OUTPUT_TOKENS` | LM Studio's Anthropic-compatible endpoint via the Anthropic SDK, JSON through a forced tool call. Prompts are budgeted to the loaded context length: a file list too long for it keeps ROUTING.md paths first, then the best name matches for the notes, and the model is told it is partial |
+| `LLM_MAX_OUTPUT_TOKENS` | Optional drafting output cap for any provider |
 | `GITEA_BASE_URL` | e.g. `https://git.konceptkit.com` |
 | `GITEA_ALLOWED_ORG` | Org short name; only its members may use the app |
 | `GITEA_OAUTH_CLIENT_ID` | Gitea OAuth2 application (confidential) |
@@ -325,8 +331,7 @@ interface ForgeClient {
   getBranchHead(owner: string, repo: string, branch: string): Promise<string>; // sha
   getTree(owner: string, repo: string, sha: string): Promise<TreeEntry[]>;
   getRawFile(owner: string, repo: string, path: string, ref: string): Promise<string>;
-  listIssueTemplates(owner: string, repo: string, ref: string): Promise<IssueTemplate[]>;
-  listLabels(owner: string, repo: string): Promise<{ id: number; name: string }[]>;
+  listLabels(owner: string, repo: string): Promise<{ id: number; name: string }[]>; // repo labels + the owning org's labels
   createIssue(owner: string, repo: string, input: CreateIssueInput): Promise<{ number: number; url: string }>;
   addDependency(owner: string, repo: string, issue: number, dependsOn: number): Promise<void>;
   listIssuesCreatedBySince(owner: string, repo: string, username: string, since: Date): Promise<{ number: number; body: string; url: string }[]>;
@@ -348,9 +353,10 @@ Implement retries with jittered backoff for 429/5xx inside `GiteaForge`, and thr
 | GET | `/api/repos` | sync | Tracked repos |
 | POST | `/api/repos` | sync | `{owner, name}` -> verify access via forge, insert |
 | POST | `/api/raw-issues` | sync | `{repo_id, body}` -> rate-limit check, insert raw issue + run in one batch, trigger drafting job, return `{run_id}` |
+| GET | `/api/runs?limit=` | sync | The team's workflow queue, newest first: repo, author, notes excerpt, status/error, draft counts by status (default 50, max 200) |
 | GET | `/api/runs/:id` | sync | Status, error, and created draft ids |
 | POST | `/api/runs/:id/retry` | sync | Only `failed` runs -> reset to `queued`, re-trigger |
-| GET | `/api/drafts?repo_id=&status=` | sync | List with deps (ids + gitea numbers) |
+| GET | `/api/drafts?repo_id=&run_id=&status=` | sync | List with deps (ids, titles, gitea numbers); `repo_id` or `run_id` required |
 | GET | `/api/drafts/:id` | sync | Detail + events |
 | PATCH | `/api/drafts/:id` | sync | `{title?, body?, labels?, version}`; 409 on version mismatch |
 | PUT | `/api/drafts/:id/deps` | sync | `{depends_on_ids, version}`; same-repo + cycle check |
@@ -374,7 +380,7 @@ Errors use one shape: `{ error: { code, message, details? } }`. Shared zod schem
 - Enable background mode with `config.background = true` (or the `-background` filename suffix).
 - The sync endpoint calls `fetch` against `${process.env.URL}/internal/...`. It sends the header `x-internal-secret: INTERNAL_JOB_SECRET`, the user's current (already refreshed) access token as `Authorization: Bearer`, and a JSON body containing the id. It awaits only the 202. The token travels server-to-server only.
 - Background functions reject any request without a matching secret (constant-time compare) and then run `withAuth` on the bearer token, so org membership is re-checked.
-- **Retries:** Netlify retries a background function that errors, after 1 minute and again after 2 more. Therefore: catch deterministic failures (validation errors, 4xx from Gitea, bad AI output after repair) -> mark the run/draft `failed` and **return normally**. Re-throw only transient failures (network, 429, 5xx) so the platform retry applies. Every job must be idempotent.
+- **Retries:** Netlify retries a background function that errors, after 1 minute and again after 2 more. Therefore: catch deterministic failures (validation errors, 4xx from Gitea, bad AI output after repair) -> mark the run/draft `failed` and **return normally**. Re-throw only transient failures (network, 429, 5xx) so the platform retry applies, except on the third attempt, which marks the run `failed` ("Gave up after 3 attempts") instead of leaving it mid-step. Every job must be idempotent. `GET /api/runs/:id` marks a run `failed` if it has been active (or queued) for more than 17 minutes, which covers a job killed by the platform.
 - **Token lifetime:** Gitea access tokens last 1 h. The 20-minute refresh margin in `withAuth` means the forwarded token has at least 20 minutes left when the job starts, which covers the 15-minute background limit. A platform retry arriving after the token has expired fails with 401. It is then marked `failed` with "sign in and retry" rather than retried.
 
 ---
@@ -388,13 +394,13 @@ Runs inside `draft-run-background`. Update `runs.status` at each step so the UI 
 3. **Snapshot (cached).** If `repo_snapshots(repo_id, sha)` exists, reuse it. Otherwise:
    - `getTree(sha)` recursively (`recursive`, `page`, `per_page`), paging until complete.
    - Filter out `node_modules/`, `dist/`, `build/`, `.git/`, `vendor/`, lockfiles, binaries/media by extension, and files over 200 KB.
-   - Fetch README (first match of `README*` at root).
-   - Fetch issue templates **at the snapshot sha** by reading `.gitea/ISSUE_TEMPLATE/` (then `.github/ISSUE_TEMPLATE/`). Gitea 1.25's `GET /repos/{owner}/{repo}/issue_templates` has no `ref` parameter, so it is not used. Support both Markdown templates (front matter + body) and YAML issue forms. For YAML forms, convert fields into a Markdown skeleton of `### <field label>` sections, matching how Gitea renders a submitted form (empty optional fields become `_No response_`; dropdown values must be one of the listed options). Parsing YAML forms needs a YAML parser: **flag the dependency** (proposed: `yaml`) before adding it.
+   - Fetch README (first match of `README*` at root) and `ROUTING.md` at root (any case; stored in the snapshot's `routing` column, capped at 30,000 characters). Every repository is expected to carry both; one without `ROUTING.md` falls back to the file list alone.
+   - Fetch issue templates **at the snapshot sha** by reading `.gitea/ISSUE_TEMPLATE/` (then `.github/ISSUE_TEMPLATE/`). Gitea 1.25's `GET /repos/{owner}/{repo}/issue_templates` has no `ref` parameter, so it is not used. Support both Markdown templates (front matter + body) and YAML issue forms. For YAML forms, convert fields into a Markdown skeleton of `### <field label>` sections, matching how Gitea renders a submitted form (empty optional fields become `_No response_`; dropdown values must be one of the listed options). Template files are found in the full tree using Gitea's own directory order (`ISSUE_TEMPLATE`, `.gitea/ISSUE_TEMPLATE`, `.github/ISSUE_TEMPLATE`, ...; `config.yml` skipped), and parsed with `yaml`.
    - Fetch labels.
    - Insert the snapshot row (`ON CONFLICT DO NOTHING`).
-4. **Select files** (`status = 'selecting_files'`, model `MODEL_SELECT`). Input: raw issue text, filtered path list with sizes, README excerpt (<= 3,000 chars). Output via forced tool call `select_files` -> `{ paths: string[] }`, max 20. Discard any path not in the tree.
+4. **Select files** (`status = 'selecting_files'`, the provider's select model). Input: raw issue text, `ROUTING.md` (the repository's map of where each area lives; the model treats it as authoritative), README excerpt (<= 8,000 chars), filtered path list with sizes. Output via structured outputs (`output_config.format`) -> `{ paths: string[] }`, max 20 kept. A repo with more than 8,000 readable files fails the run with a readable error rather than silently truncating the list. Discard any path not in the tree.
 5. **Fetch context.** `getRawFile(path, ref = sha)` for each selected path. Truncate each file to 400 lines and the total to ~150,000 characters, noting truncation inline.
-6. **Draft** (`status = 'drafting'`, model `MODEL_DRAFT`). Input: raw issue, repo name, selected file contents, templates, label names. Output via forced tool call `submit_drafts`:
+6. **Draft** (`status = 'drafting'`, the provider's draft model). Input: raw issue, repo name, `ROUTING.md`, selected file contents, templates, label names. Output via structured outputs (`output_config.format`, streamed), with the repository context cached so the repair turn re-reads it cheaply:
 
    ```json
    {
@@ -413,9 +419,9 @@ Runs inside `draft-run-background`. Update `runs.status` at each step so the UI 
    ```
 
    Prompt rules: 1-8 drafts; split only when work is genuinely separable; cite concrete file paths from the provided context; never invent labels; `depends_on` must reference keys in this response and be acyclic.
-7. **Validate.** zod schema + key references + cycle check + label whitelist. On failure, make **one** repair call that includes the validation errors. Still invalid -> run `failed`.
+7. **Validate.** First snap near-miss dropdown answers to the exact option (an answer matching exactly one option once emoji, case, and punctuation are ignored, e.g. `BUG` -> the option with the bug emoji). Then zod schema + key references + cycle check + label whitelist. On failure, make **one** repair call that includes the validation errors. Still invalid -> run `failed`.
 8. **Sanitize.** Strip any `<!-- issue-pipeline:` markers from AI output so a model can't forge the posting marker.
-9. **Commit (atomic).** One `db.batch`: insert drafts (`created_by` = raw issue author), map keys -> uuids and insert `draft_deps`, insert `created` events, set run `done` with token counts, `prompt_version`, and `finished_at`. Because drafts are written only here, a retried job never duplicates drafts.
+9. **Commit (atomic).** One `db.batch`: insert drafts (`created_by` = raw issue author), map keys -> uuids and insert `draft_deps`, insert `created` events, set run `done` with token counts, `prompt_version`, and `finished_at`. `reviewer_notes` go into each `created` event's detail. The transaction is guarded: the draft insert runs off an `UPDATE runs ... WHERE status = 'drafting' RETURNING id` CTE, and deps/events only insert for drafts that exist, so a duplicate or late invocation writes nothing. Because drafts are written only here, a retried job never duplicates drafts.
 
 **Prompts** live in `apps/api/prompts/` as TS modules exporting template strings (avoids bundling non-TS files), named with a version (`draftIssues.v1.ts`). Record the version on each run.
 
@@ -477,6 +483,7 @@ TypeScript + Vite + React + TanStack Query. Types and zod schemas come from `pac
 |---|---|
 | Login | "Sign in with Gitea" button; error states (denied, not a member, session expired) |
 | Repos | Tracked repos; search accessible repos and track one |
+| Queue | Every run, in-progress first (polls every 3 s while any run is active, otherwise 15 s): status, repo, author, notes excerpt, error, draft counts by status. Clicking a row expands its progress steps, model, tokens, notes, and drafts in place (`/queue/<run id>`); submitting New issue lands here with the new run expanded |
 | New issue | Repo select + raw text area -> submit -> run progress (poll `/api/runs/:id` every 2 s until `done`/`failed`), then jump to the new drafts |
 | Board | Columns by status: Draft, Approved, Posting, Posted, Failed; repo filter; "Post all ready" button |
 | Draft editor | Title, Markdown body with preview, label picker (repo labels), dependency picker (same-repo drafts), approve/unapprove, event history. On 409, show "Edited by someone else" with reload |
@@ -612,7 +619,7 @@ Still to verify before the phase that depends on them:
 | `[oauth2] INVALIDATE_REFRESH_TOKENS` is `false` on the instance (default) | Phase 1 | Outstanding |
 | `/api/*` functions take precedence over the SPA fallback redirect | Phase 1 | Confirmed under `netlify dev`; re-check in production |
 | A Gitea account outside `TrueRoster` for the 403 acceptance test | Phase 1 | Outstanding |
-| Background Functions on the current Netlify plan | Phase 2 | Outstanding |
-| YAML parser dependency for issue forms | Phase 2 | Awaiting approval |
+| Background Functions on the current Netlify plan | Phase 2 | Confirmed (Kayela, 2026-09-12) |
+| YAML parser dependency for issue forms | Phase 2 | Approved: `yaml` (2026-09-12) |
 | Issue dependencies enabled on each target repo | Phase 4 | Outstanding |
 | Dependency links inside the template's "Dependencies / blockers" section vs. an appended line | Phase 4 | Open |

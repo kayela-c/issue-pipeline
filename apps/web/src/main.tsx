@@ -19,6 +19,12 @@ const queryClient = new QueryClient({
     queries: {
       refetchOnWindowFocus: false,
       staleTime: 5_000,
+      // Retry only what can succeed later (network, 5xx). A 4xx or a response
+      // that fails its schema will fail the same way again, so show the error
+      // now instead of sitting on "Loading…" through silent retries.
+      retry: (failureCount, error) =>
+        failureCount < 2 &&
+        !(error instanceof ApiError && (error.code === "invalid_response" || (error.status >= 400 && error.status < 500))),
     },
   },
 });

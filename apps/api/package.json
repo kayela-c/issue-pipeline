@@ -17,6 +17,7 @@
     "@issue-pipeline/shared": "workspace:*",
     "@neondatabase/serverless": "^1.1.0",
     "drizzle-orm": "^0.45.2",
+    "yaml": "^2.9.1",
     "zod": "^4.6.2"
   },
   "devDependencies": {

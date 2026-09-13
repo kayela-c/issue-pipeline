@@ -1,23 +1,57 @@
 import type { MeResponse } from "@issue-pipeline/shared";
-import { HealthCard } from "../components/HealthCard";
 import { useLogout } from "../lib/auth";
+import { useEffect } from "react";
+import { linkHandler, replace, usePathname } from "../lib/router";
+import { NewIssue } from "./NewIssue";
+import { Queue } from "./Queue";
+import { Repos } from "./Repos";
+
+const NAV = [
+  { path: "/", label: "New issue" },
+  { path: "/queue", label: "Queue" },
+  { path: "/repos", label: "Repositories" },
+];
 
 export function Home({ me }: { me: MeResponse }) {
   const logout = useLogout();
+  const pathname = usePathname();
+  // /queue and /queue/<run id>; older /runs/<run id> links land here too.
+  const queueMatch = pathname.match(/^\/(queue|runs)(?:\/([0-9a-f-]{36}))?$/i);
+  const selectedRunId = queueMatch?.[2];
+  const section = queueMatch ? "/queue" : pathname;
+
+  useEffect(() => {
+    if (pathname.startsWith("/runs")) replace(selectedRunId ? `/queue/${selectedRunId}` : "/queue");
+  }, [pathname, selectedRunId]);
 
   return (
     <>
-      <section className="card">
-        <h2>Account</h2>
-        <p className="status status--good">
-          Signed in as <strong>{me.username}</strong>
-          {me.display_name ? ` (${me.display_name})` : ""}
-        </p>
-        <button type="button" onClick={() => logout.mutate()} disabled={logout.isPending}>
-          Sign out
-        </button>
-      </section>
-      <HealthCard />
+      <nav className="nav">
+        {NAV.map((item) => (
+          <a
+            key={item.path}
+            href={item.path}
+            onClick={linkHandler(item.path)}
+            aria-current={section === item.path ? "page" : undefined}
+          >
+            {item.label}
+          </a>
+        ))}
+        <span className="nav-user muted small">
+          {me.display_name || me.username}
+          <button type="button" className="link" onClick={() => logout.mutate()} disabled={logout.isPending}>
+            Sign out
+          </button>
+        </span>
+      </nav>
+
+      {queueMatch ? (
+        <Queue selectedId={selectedRunId} />
+      ) : pathname === "/repos" ? (
+        <Repos />
+      ) : (
+        <NewIssue />
+      )}
     </>
   );
 }

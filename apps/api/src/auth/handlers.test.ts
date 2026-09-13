@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { User } from "../db/users";
+import { fakeForge } from "../forge/fake";
 import type { ForgeClient } from "../forge/types";
 import { handleCallback, handleLogin, handleLogout, type LoginDeps } from "./handlers";
 import { codeChallenge, type TokenResult } from "./oauth";
@@ -30,10 +31,11 @@ const user: User = {
 
 function makeDeps(opts: { member?: boolean; exchange?: TokenResult } = {}) {
   return {
-    createForge: (): ForgeClient => ({
-      getCurrentUser: async () => ({ id: 7, username: "kayela" }),
-      isOrgMember: async () => opts.member ?? true,
-    }),
+    createForge: (): ForgeClient =>
+      fakeForge({
+        getCurrentUser: async () => ({ id: 7, username: "kayela" }),
+        isOrgMember: async () => opts.member ?? true,
+      }),
     upsertUser: vi.fn(async () => user),
     allowedOrg: () => "TrueRoster",
     keys: () => keys,

@@ -50,6 +50,37 @@ curl http://localhost:8888/api/health
 Scripts and tests can call the API without a browser by sending a Gitea
 personal access token as `Authorization: Bearer <token>`.
 
+Opt-in live tests (skipped by default):
+
+```sh
+LIVE_DB=1  pnpm --filter @issue-pipeline/api exec vitest run src/db    # Neon dev branch
+LIVE_LLM=1 pnpm --filter @issue-pipeline/api exec vitest run src/llm   # configured LLM provider
+```
+
+### Choosing the AI provider
+
+`LLM_PROVIDER` in `.env` picks who drafts issues; each provider keeps its own
+settings, so switching is one line plus a restart of `pnpm dev`:
+
+| `LLM_PROVIDER` | Needs | Notes |
+|---|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` | Structured outputs + prompt caching |
+| `gemini` | `GOOGLE_API_KEY` (Google AI Studio, with credits) | Called over REST with a JSON schema |
+| `lmstudio` | LM Studio 0.4.1+ running locally, `LMSTUDIO_MODEL_*`, `LMSTUDIO_CONTEXT_TOKENS` | Local development only; prompts are sized to the loaded context length |
+
+Each run records `provider/model` and the run page shows it.
+
+### Repository conventions: README.md and ROUTING.md
+
+Drafting reads two files from the root of each tracked repository:
+
+- **`README.md`**: the overview of the project.
+- **`ROUTING.md`**: a map of where each area of the system lives, for
+  example `- Password reset: app/Http/Controllers/Auth/, routes/web.php`.
+  The model uses it to choose which files to read and to fill fields such as
+  "Files / components affected". When the file list must be shortened for a
+  small model, paths it names are kept first. Repos without one still work.
+
 ## Gotchas
 
 - **`netlify.toml` is at the repository root, not in `apps/api`.** The Netlify
