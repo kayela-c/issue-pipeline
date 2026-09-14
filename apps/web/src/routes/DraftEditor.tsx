@@ -148,7 +148,7 @@ export function DraftEditor({ draftId }: { draftId: string }) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["drafts"] });
       void queryClient.invalidateQueries({ queryKey: ["runs"] });
-      navigate(d ? `/board?repo=${d.repo_id}` : "/board");
+      navigate(d ? `/queue?repo=${d.repo_id}` : "/queue");
     },
     onError,
   });
@@ -173,7 +173,7 @@ export function DraftEditor({ draftId }: { draftId: string }) {
     return (
       <section className="card">
         <p className="status status--bad">{draft.error?.message ?? "Draft not found."}</p>
-        <a href="/board" onClick={linkHandler("/board")}>
+        <a href="/queue" onClick={linkHandler("/queue")}>
           Back to the board
         </a>
       </section>
@@ -186,7 +186,7 @@ export function DraftEditor({ draftId }: { draftId: string }) {
   const actionError = [save.error, approve.error, unapprove.error, post.error, retry.error, reconcile.error, remove.error].find(
     (e): e is Error => e instanceof Error && !isStale(e),
   );
-  const boardHref = `/board?repo=${d.repo_id}`;
+  const boardHref = `/queue?repo=${d.repo_id}`;
   const toggle = (list: string[], value: string) =>
     (list.includes(value) ? list.filter((x) => x !== value) : [...list, value]).sort();
 

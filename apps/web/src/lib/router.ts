@@ -39,6 +39,15 @@ export function useSearchParam(name: string): string | null {
   return new URLSearchParams(search).get(name);
 }
 
+/** Set (or clear) one query-string parameter without a history entry, keeping the rest. */
+export function setSearchParam(name: string, value: string | null) {
+  const params = new URLSearchParams(window.location.search);
+  if (value) params.set(name, value);
+  else params.delete(name);
+  const qs = params.toString();
+  replace(window.location.pathname + (qs ? `?${qs}` : ""));
+}
+
 /** Left-click handler for in-app links that keeps modifier-clicks working. */
 export function linkHandler(path: string) {
   return (event: React.MouseEvent<HTMLAnchorElement>) => {
