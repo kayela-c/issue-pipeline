@@ -17,13 +17,14 @@
 
 [build.environment]
   # Netlify's secrets scanner fails the build if any configured env var's
-  # value appears anywhere in the repo or build output. These five are
+  # value appears anywhere in the repo or build output. These are
   # legitimately non-secret (an org name, a public Gitea host, a build mode,
-  # and two unused leftover names -- see docs/ARCHITECTURE.md section 9) and
-  # their values collide with ordinary words/identifiers used throughout the
-  # code, tests, and docs. Real secrets (API keys, SESSION_SECRET,
-  # DATABASE_URL, GITEA_OAUTH_CLIENT_SECRET, INTERNAL_JOB_SECRET) stay scanned.
-  SECRETS_SCAN_OMIT_KEYS = "GITEA_BASE_URL,GITEA_ALLOWED_ORG,NODE_ENV,MODEL_SELECT,MODEL_DRAFT"
+  # the provider name, and two unused leftover names -- see
+  # docs/ARCHITECTURE.md section 13) and their values collide with ordinary
+  # words/identifiers used throughout the code, tests, and docs. Real secrets
+  # (API keys, SESSION_SECRET, DATABASE_URL, GITEA_OAUTH_CLIENT_SECRET,
+  # INTERNAL_JOB_SECRET) stay scanned.
+  SECRETS_SCAN_OMIT_KEYS = "GITEA_BASE_URL,GITEA_ALLOWED_ORG,NODE_ENV,LLM_PROVIDER,MODEL_SELECT,MODEL_DRAFT"
 
 [functions]
   node_bundler = "esbuild"
