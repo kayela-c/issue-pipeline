@@ -101,6 +101,28 @@ Drafting reads two files from the root of each tracked repository:
   `pathname` misroutes them. Keep routing in `config.path`.
 - **The Content Security Policy for scripts is added at build time only**
   (`apps/web/vite.config.ts`); Vite's dev server needs inline scripts.
+- **Netlify's secrets scanner flags non-secret env vars** whose values
+  collide with ordinary words used throughout the code and docs (an org
+  name, a public Gitea host, etc.). Those are listed in
+  `SECRETS_SCAN_OMIT_KEYS` in `netlify.toml`; real secrets are not exempted
+  and stay scanned.
+
+## Deployment
+
+One Netlify site builds `main` and serves both the SPA and the API — see
+[section 9 of the architecture doc](docs/ARCHITECTURE.md) for environment
+variables, the Gitea OAuth redirect URIs, and provider constraints
+(`LLM_PROVIDER` must be `gemini` or `anthropic`; `lmstudio` only runs under
+`netlify dev`). After a deploy, verify the happy path end-to-end:
+
+```sh
+pip install -r scripts/requirements.txt
+python scripts/smoke_test.py --base-url https://<site>.netlify.app \
+    --token <gitea-personal-access-token> --owner <org> --repo <repo>
+```
+
+The token needs the same scopes the app itself requests: `read:user
+read:organization read:repository write:issue`.
 
 ## Security
 
