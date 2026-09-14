@@ -667,7 +667,7 @@ Still to verify or decide before the phase that depends on them:
 | Item | Needed by | Status |
 |---|---|---|
 | `[oauth2] INVALIDATE_REFRESH_TOKENS` is `false` on the instance | Phase 1 | Not explicitly confirmed; the default `false` is assumed. If `true`, parallel refreshes revoke the grant and refresh must be serialized |
-| `/api/*` functions take precedence over the JSON-404 redirect | Phase 5 | **Failed in production (2026-09-14):** the first live deploy answered every `/api/*` route with the JSON 404, because that redirect was `force = true` and a forced rule shadows functions with a `config.path` (under `netlify dev` the functions still won). `force` removed; re-check `/api/health` and an unknown `/api` path after the next deploy |
+| `/api/*` functions take precedence over the JSON-404 redirect | Phase 5 | **Failed in production (2026-09-14):** the first live deploy answered every `/api/*` route with the JSON 404, because that redirect was `force = true` and a forced rule shadows functions with a `config.path` (under `netlify dev` the functions still won). `force` removed. **Confirmed fixed in production (2026-09-14):** `/api/health` 200 with `db: ok`, `/api/me` 401 from `withAuth`, an unknown `/api` path gets the JSON 404 |
 | Gitea OAuth redirect URI registered for `https://issue-pipeline.netlify.app` | Phase 5 | Outstanding -- Kayela's own Gitea admin access |
 | Netlify's production branch setting is `main` (not still `prod`) | Phase 5 | Outstanding -- Kayela needs to flip this back in the Netlify dashboard; not done by the agent (no Netlify access) |
 | `origin/prod` deleted | Phase 5 | Outstanding -- confirm it's gone from GitHub, not just deleted locally |
