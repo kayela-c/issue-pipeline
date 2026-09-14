@@ -287,6 +287,13 @@ pre.notes {
   margin-top: 2px;
 }
 
+.queue-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 8px;
+}
+
 .queue-side {
   display: flex;
   flex-direction: column;

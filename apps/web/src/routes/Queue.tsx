@@ -1,7 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DRAFT_STATUSES, isTerminalRunStatus, type RunStatus, type RunSummary } from "@issue-pipeline/shared";
 import { useEffect, useRef } from "react";
-import { listRuns } from "../lib/api";
+import { listRuns, retryRun } from "../lib/api";
 import { linkHandler } from "../lib/router";
 import { RunView } from "./RunView";
 
@@ -39,6 +39,14 @@ function RunRow({ run, expanded }: { run: RunSummary; expanded: boolean }) {
   // Clicking an open row closes it; clicking another opens that one instead.
   const href = expanded ? "/queue" : `/queue/${run.id}`;
   const ref = useRef<HTMLLIElement>(null);
+  const queryClient = useQueryClient();
+  const retry = useMutation({
+    mutationFn: () => retryRun(run.id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["run", run.id] });
+    },
+  });
 
   // Bring a run opened from elsewhere (e.g. just submitted) into view.
   useEffect(() => {
@@ -67,6 +75,14 @@ function RunRow({ run, expanded }: { run: RunSummary; expanded: boolean }) {
           <DraftCounts drafts={run.drafts} />
         </div>
       </a>
+      {!expanded && run.status === "failed" && (
+        <div className="queue-row-actions">
+          {retry.error && <span className="status status--bad small">{retry.error.message}</span>}
+          <button type="button" onClick={() => retry.mutate()} disabled={retry.isPending}>
+            {retry.isPending ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      )}
       {expanded && <RunView runId={run.id} />}
     </li>
   );

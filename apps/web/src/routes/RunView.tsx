@@ -134,6 +134,9 @@ export function RunView({ runId }: { runId: string }) {
               <div className="preview preview--compact">
                 <Markdown>{d.body}</Markdown>
               </div>
+              <a className="small" href={`/drafts/${d.id}`} onClick={linkHandler(`/drafts/${d.id}`)}>
+                Edit this draft →
+              </a>
             </article>
           ))}
         </div>
