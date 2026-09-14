@@ -116,7 +116,7 @@ issue-pipeline/
 |       +-- drizzle.config.ts
 +-- packages/
 |   +-- shared/                       # zod schemas + inferred TS types (API contract)
-+-- scripts/                          # Python utilities (seed_gitea.py, smoke_test.py -- not yet built)
++-- scripts/                          # Python utilities (smoke_test.py; seed_gitea.py -- not yet built)
 +-- docs/ARCHITECTURE.md              # this file
 +-- feature-task.yml                  # the TrueRoster issue form, used as a test fixture
 +-- netlify.toml                      # at the repo root (see README "Gotchas")
@@ -542,13 +542,14 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 
 ## 9. Deployment -- Phase 5
 
-1. **One Netlify site** built from `main`: build command compiles `packages/shared` and `apps/web`; `publish = apps/web/dist`; `functions = apps/api/netlify/functions`. No base directory.
-2. **Environments:** production uses a Neon production branch; local dev (`netlify dev`) uses the Neon `dev` branch. Migrations are applied with `pnpm db:migrate` before a deploy that needs them.
-3. **Gitea OAuth app:** confidential client with redirect URIs `https://<production-site>/api/auth/callback` and `http://localhost:8888/api/auth/callback`.
-4. **Secrets** (`GITEA_OAUTH_CLIENT_SECRET`, `SESSION_SECRET`, `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY`, `DATABASE_URL`, `INTERNAL_JOB_SECRET`) live only in Netlify environment variables and the local, gitignored `.env`. Use different `SESSION_SECRET` values per environment.
+1. **One Netlify site** built from `main`: build command compiles `packages/shared` and `apps/web`; `publish = apps/web/dist`; `functions = apps/api/netlify/functions`. No base directory. `netlify.toml` at the repo root already has this -- **done**.
+2. **Environments:** production uses the Neon project's `main` branch (its default/primary branch); local dev (`netlify dev`) uses the `dev` branch. Migrations are applied with `pnpm db:migrate` before a deploy that needs them. **Done (2026-09-14):** `main` had zero tables (only `dev` had ever been migrated); `pnpm db:migrate` was run against it and all 8 tables plus `drizzle.__drizzle_migrations` now exist.
+3. **Gitea OAuth app:** confidential client with redirect URIs `https://<production-site>/api/auth/callback` and `http://localhost:8888/api/auth/callback`. **Outstanding** -- needs the production site's URL first (see below), then an admin adds it in Gitea.
+4. **Secrets** (`GITEA_OAUTH_CLIENT_SECRET`, `SESSION_SECRET`, `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY`, `DATABASE_URL`, `INTERNAL_JOB_SECRET`) live only in Netlify environment variables and the local, gitignored `.env`. Use different `SESSION_SECRET` values per environment. **Outstanding** -- Netlify site creation and env vars are done from the Netlify dashboard/CLI with Kayela's own login, not by the agent.
 5. **AI provider:** `LLM_PROVIDER` must be `gemini` or `anthropic` in production; `lmstudio` refuses to run outside `netlify dev`.
 6. **Key rotation:** set the new key as `SESSION_SECRET` and the old one as `SESSION_SECRET_PREVIOUS`; remove the old key after `SESSION_MAX_AGE_DAYS`.
 7. **Deploy previews** build and serve the UI and `/api/health`, but sign-in is unsupported there (their URLs are not registered redirect URIs).
+8. **Smoke test:** `scripts/smoke_test.py` (Python, `requests`) runs the full path -- track a repo, submit notes, wait for drafting, approve, post -- against a deployed site using a bearer PAT (`pip install -r scripts/requirements.txt`, then see the script's docstring for usage). **Built, not yet run against a live deployment** (there is no production site to point it at yet).
 
 ---
 
@@ -621,8 +622,9 @@ Each phase ends with its acceptance criteria passing and a short summary back to
 - Covered by unit tests against fakes (`pipeline/post.test.ts`) and, for the raw SQL itself, by live tests against the Neon dev branch (`db/runs.live.test.ts`, "posting").
 - **Accept (not yet run against a live Gitea):** the posted issue appears in Gitea authored by the posting user with the hidden marker; dependencies post first and are linked; posting a blocked draft returns 409 naming the unposted dependencies; the failure-injection test (Section 11, still not built -- needs the Docker Gitea integration environment) yields exactly one issue after reconcile.
 
-### Phase 5 -- Production deployment
-- Production Netlify site and env vars, Neon production branch + migrations, production redirect URI on the Gitea OAuth app, `scripts/smoke_test.py`.
+### Phase 5 -- Production deployment -- PARTIALLY DONE
+- **Done (2026-09-14):** `netlify.toml` build config; Neon `main` branch migrated (it is the project's default/primary branch and had never been migrated -- `dev` was branched off it before any schema existed); `scripts/smoke_test.py`.
+- **Outstanding, owned by Kayela** (Netlify account and Gitea admin access, not the agent's): create the production Netlify site from `main`, set its environment variables (Section 9 item 4), register the production redirect URI on the Gitea OAuth app once the site URL exists.
 - **Accept:** sign-in works on the production URL; the smoke test passes against production.
 
 ### Phase 6 -- Hardening
@@ -656,13 +658,15 @@ Resolved:
 15. **Posting reason codes (2026-09-13):** `POST /api/drafts/:id/post` and `/reconcile` use their own `details.reason` values (`unposted_deps`, `claimed`, `not_stale`) rather than being forced into the edit endpoints' `status` | `stale` pair, since the ways a claim or a reconcile can be refused genuinely differ from a stale edit.
 16. **Retry logs no new event (2026-09-13):** `failed -> approved` via `POST /api/drafts/:id/retry` does not add a `draft_events` row. The existing `claimed` -> `failed` history already shows what happened; none of the ten documented event names (Section 4) fit "retried" without being reused in a way that would misread as a fresh human decision.
 17. **`post-queue-background` never throws for a platform retry (2026-09-13):** unlike `draft-run-background`, each draft it posts is claimed atomically, so a lost race just moves on to the next ready draft. Retrying the whole batch on a platform retry would only redo work the loop's own stop conditions already bound.
+18. **Neon production branch is `main` (2026-09-14):** the project's default/primary branch, not a separately created one. It had never been migrated (`dev` was branched off it right after project creation, before any schema existed), so `pnpm db:migrate` was run against it directly.
 
 Still to verify or decide before the phase that depends on them:
 
 | Item | Needed by | Status |
 |---|---|---|
 | `[oauth2] INVALIDATE_REFRESH_TOKENS` is `false` on the instance | Phase 1 | Not explicitly confirmed; the default `false` is assumed. If `true`, parallel refreshes revoke the grant and refresh must be serialized |
-| `/api/*` functions take precedence over the SPA fallback redirect | Phase 5 | Confirmed under `netlify dev`; re-check in production |
+| `/api/*` functions take precedence over the SPA fallback redirect | Phase 5 | Confirmed under `netlify dev`; re-check once a production site exists |
+| Production Netlify site created, env vars set, Gitea OAuth redirect URI registered | Phase 5 | Outstanding -- Kayela's own accounts, not done by the agent |
 | Issue dependencies enabled on each target repo | Phase 4 acceptance | Outstanding -- not verified against a real Gitea in this session |
 | Dependency links inside the template's "Dependencies / blockers" section vs. an appended line | Future | Open; Phase 4 shipped with the simple appended `**Depends on:**` line |
 | Whether to add `remark-gfm` so checklists and tables render in the preview | Phase 3 follow-up | Open |
