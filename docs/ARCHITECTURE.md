@@ -83,7 +83,7 @@ issue-pipeline/
 |   |   |   +-- lib/auth.ts           # session hooks (useMe, logout, login error messages)
 |   |   |   +-- lib/router.ts         # tiny history-API router (no router dependency)
 |   |   |   +-- routes/               # Login, Home (nav), NewIssue, Queue, RunView, Board, DraftEditor, Repos, Settings
-|   |   |   +-- routes/settings/      # AiSettings (Connections and Templates arrive in Phases 7-8)
+|   |   |   +-- routes/settings/      # AiSettings, Templates (Connections arrives in Phase 8)
 |   |   |   +-- components/Markdown.tsx  # react-markdown, raw HTML never rendered
 |   |   +-- public/api-not-found.json # JSON 404 for unknown /api paths
 |   |   +-- vite.config.ts            # build-time CSP meta tag
@@ -113,6 +113,8 @@ issue-pipeline/
 |       |   +-- crypto/credentials.ts # CREDENTIALS_KEY sealing, AAD bound to column + user + subject
 |       |   +-- settings/ai.ts        # per-user AI settings DTO and llmConfigForUser
 |       |   +-- db/settings.ts        # user_ai_settings / user_ai_providers queries
+|       |   +-- settings/templates.ts # template request parsing, usability check, repoForge
+|       |   +-- db/templates.ts       # issue_templates queries, run snapshots
 |       |   +-- pipeline/draft.ts     # Stage 1 job
 |       |   +-- pipeline/tree.ts      # tree filtering, README/ROUTING.md discovery
 |       |   +-- pipeline/templates.ts # issue template discovery + parsing
@@ -141,7 +143,7 @@ issue-pipeline/
 
 ## 4. Data model (Neon Postgres)
 
-Defined in Drizzle (`apps/api/src/db/schema.ts`); migrations are generated with `drizzle-kit` and applied with `pnpm db:migrate`. Applied so far: `0000_init`, `0001_snapshot_routing` (adds `repo_snapshots.routing` and clears cached snapshots), `0002_user_ai_settings` (Phase 6; applied to both the Neon `dev` and `main` branches, 2026-09-14). Statuses use `text` + `CHECK` rather than enums so they are easy to extend.
+Defined in Drizzle (`apps/api/src/db/schema.ts`); migrations are generated with `drizzle-kit` and applied with `pnpm db:migrate`. Applied so far: `0000_init`, `0001_snapshot_routing` (adds `repo_snapshots.routing` and clears cached snapshots), `0002_user_ai_settings` (Phase 6; applied to both the Neon `dev` and `main` branches, 2026-09-14), `0003_issue_templates` (Phase 7; applied to both the Neon `dev` and `main` branches, 2026-09-14). Statuses use `text` + `CHECK` rather than enums so they are easy to extend.
 
 There is deliberately **no sessions table**: session state lives in the encrypted cookie (Section 5).
 
@@ -228,6 +230,25 @@ CREATE TABLE drafts (
   CHECK (status <> 'posted' OR gitea_number IS NOT NULL)
 );
 CREATE INDEX drafts_repo_status_idx ON drafts (repo_id, status);
+
+-- Phase 7: team-wide issue templates managed in Settings.
+CREATE TABLE issue_templates (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        text NOT NULL UNIQUE CHECK (length(name) BETWEEN 1 AND 100),
+  forges      text[] NOT NULL CHECK (cardinality(forges) > 0
+                AND forges <@ ARRAY['gitea','github','gitlab','bitbucket']),
+  kind        text NOT NULL CHECK (kind IN ('markdown','form')),
+  content     text NOT NULL CHECK (length(content) BETWEEN 1 AND 50000),
+  version     int NOT NULL DEFAULT 1,            -- optimistic concurrency for edits
+  created_by  uuid REFERENCES users(id) ON DELETE SET NULL,
+  updated_by  uuid REFERENCES users(id) ON DELETE SET NULL,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE raw_issues ADD COLUMN template_id uuid REFERENCES issue_templates(id) ON DELETE SET NULL;
+-- {id, name, file, kind, content, version}: the app template copied at submission,
+-- so editing or deleting it never changes the run or its retries. NULL = repo templates.
+ALTER TABLE runs ADD COLUMN template_snapshot jsonb;
 
 -- Phase 6: per-user AI settings. No row, or provider NULL, means the team default.
 CREATE TABLE user_ai_settings (
@@ -423,6 +444,10 @@ interface ForgeClient {
 | POST | `/api/drafts/:id/post` | sync | built | Post one draft now (Section 7); only throws if the claim itself is refused (409) -- every other outcome is persisted and returned in the draft |
 | POST | `/api/drafts/:id/reconcile` | sync | built | Resolve a stuck `posting`, or retry unlinked dependency links on a `posted` draft (Section 7) |
 | POST | `/api/repos/:id/post-queue` | sync -> bg | built | Trigger background posting of every ready draft in the repo |
+| GET | `/api/templates` | sync | built | The team's app templates (content, derived `file` name, forges, kind, version, creator/editor usernames) |
+| POST | `/api/templates` | sync | built | `{name, forges, kind, content}`; the kind must suit every forge; content must pass `checkTemplate`; 409 `name_taken` |
+| GET, PATCH, DELETE | `/api/templates/:id` | sync | built | PATCH replaces with `{..., version}`, 409 `stale` when someone saved first; DELETE removes it (raw issues' `template_id` is nulled, runs keep their snapshot). Anyone in the org may edit or delete |
+| POST | `/api/template-preview` | sync | built | `{kind, content, forges}` -> `{errors, warnings, template}` parsed as drafting will read it; saves nothing (not `/api/templates/preview`, which would collide with `:id`) |
 | GET | `/api/settings/ai` | sync | built | The caller's AI settings: chosen provider (null = team default) and, per provider, models, `has_key`, `key_last4`, whether a team key exists, default models. Never a key |
 | PUT | `/api/settings/ai` | sync | built | `{provider}` (null = team default) |
 | PUT | `/api/settings/ai/:provider` | sync | built | `{model_select, model_draft, api_key?, clear_key?}`; the key is sealed before storage and never returned |
@@ -463,7 +488,7 @@ Runs inside `draft-run-background`. Updates `runs.status` at each step so the UI
    - Insert the snapshot row (`ON CONFLICT DO NOTHING`).
 4. **Select files** (`status = 'selecting_files'`, the provider's select model). Input: raw issue text, `ROUTING.md` (the model treats it as the authoritative map of where each area lives), README excerpt (<= 8,000 chars), and the filtered path list with sizes. Output `{ paths: string[] }`; unknown paths are dropped and at most 20 kept. A repo with more than 8,000 readable files fails with a readable error.
 5. **Fetch context.** `getRawFile(path, ref = sha)` for each selected path (5 at a time), skipping files that vanished or contain NUL bytes. Truncate each file to 400 lines and the total to ~150,000 characters, noting truncation inline.
-6. **Draft** (`status = 'drafting'`, the provider's draft model). Input: raw issue, repo name, `ROUTING.md`, selected file contents, template descriptions (for forms: each section, required or optional, exact dropdown options), label names. Output:
+6. **Draft** (`status = 'drafting'`, the provider's draft model). Input: raw issue, repo name, `ROUTING.md`, selected file contents, template descriptions (for forms: each section, required or optional, exact dropdown options), label names. When the run has a `template_snapshot` (an app template picked at submission), that one template replaces the repository's templates for the prompt, validation, dropdown snapping, and template labels; drafts record its derived file name (e.g. `bug-report.md`) as `template_name`. A snapshot that no longer parses fails the run with guidance. Output:
 
    ```json
    {
@@ -567,12 +592,12 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 | Screen | Path | Contents |
 |---|---|---|
 | Sign in | `/login` | "Sign in with Gitea" button; error states |
-| New issue | `/` | Repo select + notes text area -> submit -> lands on the Queue with the new run expanded |
+| New issue | modal from the nav bar | Repo select, template select ("Repository's own templates" by default, or an app template offered for the repo's forge), notes text area -> submit -> lands on the Queue with the new run expanded. The run detail shows which template was used |
 | Queue | `/queue`, `/queue/<run id>` | Every run, in-progress first, then recent: status pill, repo, author, time, notes excerpt, error, draft counts by status. Clicking a row expands its progress steps, commit, model, tokens, notes, retry (when failed), and drafts (rendered Markdown, linked to the editor). Old `/runs/<id>` links redirect here |
 | Board | `/board?repo=<id>` | Columns by status: Draft, Approved, Posting, Posted, Failed; repo filter (or all repos). Cards: title, repo, labels, "Blocked by N unposted drafts", issue number, approver |
 | Draft editor | `/drafts/<id>` | Status, repo, template, author, approver, Gitea link. While `draft`: title, body with Write / Preview tabs, label chips (repo labels live from Gitea), dependency checkboxes (same-repo drafts with their status), Save, Approve (disabled while there are unsaved changes), Delete with inline confirm. While `approved`: read-only view with Unapprove. "Needed by" list and event history. A stale save or approval shows **"Edited by someone else"** with Reload; the editor also polls every 15 s and flags a newer version if the form has unsaved edits |
 | Repositories | `/repos` | Tracked repos; search accessible repos and track one (disabled for archived repos or repos with issues turned off) |
-| Settings | `/settings/ai`, `/settings/connections`, `/settings/templates` | Sub-tabs. **AI model:** radio list of "Team default (<provider>)", Anthropic, Gemini, Grok, OpenAI, Venice (saved on click, badges for "your key" / "team key"). Choosing a provider shows its panel: API key (password field; a saved key shows only "ending in ...abcd" with Replace/Remove), select and draft model fields with suggestions listed live from the provider (free text allowed), Save, and Test (disabled while unsaved). A warning shows when neither the user nor the team has a key. Connections and Templates are placeholders until Phases 8 and 7 |
+| Settings | `/settings/ai`, `/settings/connections`, `/settings/templates` | Sub-tabs. **AI model:** radio list of "Team default (<provider>)", Anthropic, Gemini, Grok, OpenAI, Venice (saved on click, badges for "your key" / "team key"). Choosing a provider shows its panel: API key (password field; a saved key shows only "ending in ...abcd" with Replace/Remove), select and draft model fields with suggestions listed live from the provider (free text allowed), Save, and Test (disabled while unsaved). A warning shows when neither the user nor the team has a key. **Templates:** list of team templates (format and forge badges, derived file name, last editor) with New and Edit. The editor has name, "Offered for" forge chips, format radios (Issue form disabled when a Markdown-only forge is chosen), a monospace content area with "Start from an example", and a live preview from `/api/template-preview`: errors (which disable Save), notes, title prefix/about/labels, then the rendered Markdown body or the form's `### label` sections with type, required, and options. Save handles a stale version with Reload; Delete asks inline and says existing runs keep their copy. Connections is a placeholder until Phase 8 |
 | Card actions | built | Post and Unapprove on `approved` drafts, Retry on `failed`, Reconcile on `posting` (all in the draft editor); "Post all ready" on the board, scoped to the selected repo |
 
 **Markdown renders AI-written text, so it must not render raw HTML.** `components/Markdown.tsx` uses `react-markdown` with `skipHtml` and its default URL filter, and opens links in a new tab with `rel="noopener noreferrer"`. A test asserts script tags, event handlers, and `javascript:` links never reach the page. GitHub-flavoured extras (task-list checkboxes, tables) would need `remark-gfm`, not added; `- [ ]` checklists currently render as plain text in the preview.
@@ -629,6 +654,7 @@ Run everything with `pnpm -r test`. Current coverage:
   - Stage 1 job with an in-memory store: key -> id mapping, snapshot reuse, one repair then failure, deterministic vs transient failures, platform retry producing drafts exactly once, last-attempt give-up, local dev single attempt, ROUTING.md reaching both calls.
   - AI clients: Anthropic structured vs tool mode, tool-result pairing on repair, stop reasons; Gemini schema requests, thought handling, repair replay, retries on 503/429, depleted credits not retried, error descriptions (including the LM Studio context-overflow message).
   - Review rules: dependency checks and refusal reasons.
+  - App templates: derived file names, the real TrueRoster form accepted, unreadable YAML / missing body / no sections / duplicate ids / option-less dropdowns as errors, skipped fields and Bitbucket labels as warnings, snapshot parsing; the drafting job using a run's app template instead of the repository's (prompt, labels, `template_name`), rejecting drafts that pick the repository's template, and failing an unparseable snapshot. Live (`LIVE_DB=1`): name uniqueness, version-guarded update, snapshot copied onto a run and kept after the template is deleted.
   - Stored credentials: round trip, binding to user/provider/column, previous-key rotation, tampering. Provider resolution: team default, user key and models, team-key fallback, missing key or models as `AiSettingsError`. OpenAI-compatible client: URLs, token-cap field per provider, Venice parameters, repair replay, fenced JSON, refusal/length/empty output, retries, exhausted quota not retried, error descriptions. Live model-list parsing per provider (OpenAI non-chat filtering, Venice schema capability).
   - `postDraft`/`reconcileDraft` with an in-memory store and `fakeForge`: claim refusal reasons, label id mapping and dropped-label recording, an ambiguous `createIssue` failure left `posting` instead of guessed at, a definite failure marked `failed`, a link failure recorded without undoing the post, reconcile finding (or not finding) the marker on Gitea, and retrying unlinked dependency links.
 - **Unit (vitest, `apps/web`):** API wrapper error mapping; Markdown renders structure but never raw HTML or `javascript:` links.
@@ -676,7 +702,7 @@ Each phase ends with its acceptance criteria passing and a short summary back to
 
 Phases 6-10 add a **Settings** tab (decision 21). Settings are built and tested under `netlify dev` while production sign-in is blocked (Phase 5).
 
-### Phase 6 -- Settings shell and per-user AI settings -- BUILT, awaiting acceptance (uncommitted)
+### Phase 6 -- Settings shell and per-user AI settings -- BUILT, awaiting acceptance (`16cfdf2`)
 - `CREDENTIALS_KEY` and encrypted credential columns (AES-256-GCM, AAD `"<table>:<column>:<user id>"`, previous key accepted during rotation), sharing its cipher core with the session cookie.
 - Providers: Anthropic, Gemini, and an OpenAI-compatible REST client for OpenAI, xAI Grok, and Venice (fixed base URLs, `response_format: json_schema`). LM Studio stays env-only and dev-only.
 - `user_ai_settings` table. The client for a run is resolved for the user who triggered it: their provider with their own key -> their provider with the team's env key -> the env provider (today's behaviour) -> an error telling them to add a key.
@@ -685,10 +711,11 @@ Phases 6-10 add a **Settings** tab (decision 21). Settings are built and tested 
 - Deviations from the plan: the Test endpoint is not rate-limited yet (each click makes up to two small model calls on the caller's own key or the team's; rate limits are Phase 11 work). A retry uses the settings of whoever retries, since the job runs as the triggering user.
 - **Accept:** a user with their own key for a new provider runs drafting and `runs.model_draft` names that provider; a user with no settings still uses the env provider; no key appears in any API response or log line.
 
-### Phase 7 -- Issue templates in Settings
+### Phase 7 -- Issue templates in Settings -- BUILT, awaiting acceptance
 - `issue_templates` (team-wide; forges it applies to; Markdown or YAML form; raw content), CRUD with optimistic `version`, server-side preview through `pipeline/templates.ts`.
 - Format options by forge: Gitea and GitHub offer Markdown or a YAML issue form; GitLab and Bitbucket offer Markdown only.
 - New issue modal picks "Repo's templates" (default) or an app template; the run snapshots the app template it used.
+- As built: the snapshot is taken at submission (in `POST /api/raw-issues`), not when the job starts, so a retry drafts with the same template even if it was edited or deleted meanwhile. Until Phase 8 adds `repos.forge`, every tracked repo counts as Gitea (`repoForge` in `src/settings/templates.ts`), so only templates offered for Gitea appear in the New issue picker. Templates are team-wide and anyone in the org can edit or delete them, matching the approval policy (decision 8).
 - **Accept:** a YAML form made in Settings drives drafting and validation on a Gitea repo; editing it later does not change old runs.
 
 ### Phase 8 -- Forge connections and GitHub

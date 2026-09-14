@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, count, desc, eq, gt, inArray, notInArray, sql } from "drizzle-orm";
 import { TERMINAL_RUN_STATUSES, type RunStatus, type RunSummary } from "@issue-pipeline/shared";
 import { getDb, schema } from "./client";
-import type { Repo, Run } from "./schema";
+import type { Repo, Run, TemplateSnapshot } from "./schema";
 
 export async function countRunsSince(authorId: string, since: Date): Promise<number> {
   const [row] = await getDb()
@@ -13,18 +13,20 @@ export async function countRunsSince(authorId: string, since: Date): Promise<num
   return row?.n ?? 0;
 }
 
-/** Insert a raw issue and its queued run atomically. */
+/** Insert a raw issue and its queued run atomically, with the app template (if any) copied onto the run. */
 export async function createRawIssueWithRun(input: {
   repoId: string;
   authorId: string;
   body: string;
+  template?: TemplateSnapshot;
 }): Promise<string> {
   const rawIssueId = randomUUID();
   const runId = randomUUID();
+  const { template, ...rawIssue } = input;
   const db = getDb();
   await db.batch([
-    db.insert(schema.rawIssues).values({ id: rawIssueId, ...input }),
-    db.insert(schema.runs).values({ id: runId, rawIssueId }),
+    db.insert(schema.rawIssues).values({ id: rawIssueId, ...rawIssue, templateId: template?.id ?? null }),
+    db.insert(schema.runs).values({ id: runId, rawIssueId, templateSnapshot: template ?? null }),
   ]);
   return runId;
 }

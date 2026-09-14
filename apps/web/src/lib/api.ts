@@ -8,6 +8,9 @@ import {
   draftListResponseSchema,
   giteaRepoListResponseSchema,
   healthResponseSchema,
+  issueTemplateSchema,
+  templateListResponseSchema,
+  templatePreviewResponseSchema,
   meResponseSchema,
   repoLabelsResponseSchema,
   repoListResponseSchema,
@@ -19,7 +22,12 @@ import {
   type AiSettingsResponse,
   type AiTestResponse,
   type ApiErrorCode,
+  type CreateTemplateRequest,
   type Draft,
+  type IssueTemplateDto,
+  type TemplatePreviewRequest,
+  type TemplatePreviewResponse,
+  type UpdateTemplateRequest,
   type DraftDetail,
   type GiteaRepo,
   type HealthResponse,
@@ -119,8 +127,10 @@ export function trackRepo(owner: string, name: string): Promise<Repo> {
   return request("POST", "/api/repos", repoSchema, { owner, name });
 }
 
-export async function createRawIssue(repoId: string, body: string): Promise<string> {
-  return (await request("POST", "/api/raw-issues", createRawIssueResponseSchema, { repo_id: repoId, body })).run_id;
+export async function createRawIssue(repoId: string, body: string, templateId: string | null = null): Promise<string> {
+  return (
+    await request("POST", "/api/raw-issues", createRawIssueResponseSchema, { repo_id: repoId, body, template_id: templateId })
+  ).run_id;
 }
 
 export async function listRuns(): Promise<RunSummary[]> {
@@ -227,4 +237,24 @@ export async function listAiModels(provider: AiProvider): Promise<AiModel[]> {
 
 export function testAiProvider(provider: AiProvider): Promise<AiTestResponse> {
   return request("POST", `/api/settings/ai/${provider}/test`, aiTestResponseSchema, {});
+}
+
+export async function listTemplates(): Promise<IssueTemplateDto[]> {
+  return (await request("GET", "/api/templates", templateListResponseSchema)).templates;
+}
+
+export function createTemplate(input: CreateTemplateRequest): Promise<IssueTemplateDto> {
+  return request("POST", "/api/templates", issueTemplateSchema, input);
+}
+
+export function updateTemplate(id: string, input: UpdateTemplateRequest): Promise<IssueTemplateDto> {
+  return request("PATCH", `/api/templates/${encodeURIComponent(id)}`, issueTemplateSchema, input);
+}
+
+export async function deleteTemplate(id: string): Promise<void> {
+  await request("DELETE", `/api/templates/${encodeURIComponent(id)}`, z.null());
+}
+
+export function previewTemplate(input: TemplatePreviewRequest): Promise<TemplatePreviewResponse> {
+  return request("POST", "/api/template-preview", templatePreviewResponseSchema, input);
 }

@@ -33,6 +33,9 @@ export default withAuth(async (_req, _auth, context) => {
     input_tokens: r.inputTokens,
     output_tokens: r.outputTokens,
     model_draft: r.modelDraft,
+    app_template: r.templateSnapshot
+      ? { name: r.templateSnapshot.name, file: r.templateSnapshot.file, kind: r.templateSnapshot.kind }
+      : null,
     created_at: r.createdAt.toISOString(),
     started_at: r.startedAt?.toISOString() ?? null,
     finished_at: r.finishedAt?.toISOString() ?? null,

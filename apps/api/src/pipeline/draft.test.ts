@@ -29,11 +29,11 @@ const goodOutput: DraftOutput = {
 };
 
 /** An in-memory stand-in for the runs/snapshots tables with the same claim semantics. */
-function memoryStore() {
+function memoryStore(opts: { templateSnapshot?: Run["templateSnapshot"] } = {}) {
   const run: Run = {
     id: RUN_ID, rawIssueId: "r", status: "queued", commitSha: null, promptVersion: null, modelSelect: null,
     modelDraft: null, inputTokens: null, outputTokens: null, error: null, attempts: 0,
-    createdAt: new Date(), startedAt: null, finishedAt: null,
+    templateSnapshot: opts.templateSnapshot ?? null, createdAt: new Date(), startedAt: null, finishedAt: null,
   };
   const snapshots = new Map<string, SnapshotData>();
   const committed: Array<Parameters<typeof commitDrafts>[0]> = [];
@@ -84,7 +84,12 @@ function forge(overrides: Parameters<typeof fakeForge>[0] = {}) {
 
 function llm(
   outputs: DraftOutput[],
-  opts: { selectError?: unknown; contextTokens?: number; onSelect?: (input: Parameters<LlmClient["selectFiles"]>[0]) => void } = {},
+  opts: {
+    selectError?: unknown;
+    contextTokens?: number;
+    onSelect?: (input: Parameters<LlmClient["selectFiles"]>[0]) => void;
+    onDraft?: (input: Parameters<LlmClient["draftIssues"]>[0]) => void;
+  } = {},
 ): LlmClient & { drafts: number } {
   const client = {
     drafts: 0,
@@ -94,7 +99,8 @@ function llm(
       if (opts.selectError) throw opts.selectError;
       return { paths: ["src/db.ts", "not/in/tree.ts"], usage: { inputTokens: 10, outputTokens: 5 } };
     },
-    async draftIssues(): Promise<DraftConversation> {
+    async draftIssues(input: Parameters<LlmClient["draftIssues"]>[0]): Promise<DraftConversation> {
+      opts.onDraft?.(input);
       client.drafts += 1;
       return {
         output: outputs[0]!,
@@ -274,6 +280,57 @@ describe("ROUTING.md", () => {
     await runDraftJob(RUN_ID, { store, forge: forge(), llm: llm([goodOutput]), models });
     expect(run.status).toBe("done");
     expect([...snapshots.values()][0]!.routing).toBeNull();
+  });
+});
+
+describe("app templates", () => {
+  const repoWithTemplate = () =>
+    forge({
+      getTree: async () => [
+        { path: "README.md", size: 20 },
+        { path: ".gitea/ISSUE_TEMPLATE/repo-task.md", size: 30 },
+        { path: "src/db.ts", size: 50 },
+      ],
+      getRawFile: async (_o, _r, path) => (path.endsWith("repo-task.md") ? "## Repo section\n" : `contents of ${path}`),
+    });
+  const snapshot = {
+    id: "00000000-0000-4000-8000-0000000000cc",
+    name: "Bug report",
+    file: "bug-report.md",
+    kind: "markdown" as const,
+    content: "---\nlabels: [backend]\n---\n## Steps to reproduce\n",
+    version: 3,
+  };
+  const withTemplate = (template_name: string): DraftOutput => ({
+    drafts: [{ key: "a", title: "Crash", body: "## Steps to reproduce\n1. Open", template_name, labels: [], depends_on: [] }],
+    reviewer_notes: null,
+  });
+
+  it("drafts with the run's app template instead of the repository's, adding its labels", async () => {
+    const { store, run, committed } = memoryStore({ templateSnapshot: snapshot });
+    let templates = "";
+    const client = llm([withTemplate("bug-report.md")], { onDraft: (input) => (templates = input.templates) });
+
+    await runDraftJob(RUN_ID, { store, forge: repoWithTemplate(), llm: client, models });
+
+    expect(run.status).toBe("done");
+    expect(templates).toContain("Template file: bug-report.md");
+    expect(templates).not.toContain("repo-task.md");
+    expect(committed[0]!.drafts[0]).toMatchObject({ template_name: "bug-report.md", labels: ["backend"] });
+  });
+
+  it("rejects drafts that pick the repository's template while an app template is in use", async () => {
+    const { store, run } = memoryStore({ templateSnapshot: snapshot });
+    await runDraftJob(RUN_ID, { store, forge: repoWithTemplate(), llm: llm([withTemplate("repo-task.md")]), models });
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/"repo-task.md" is not one of the provided template files/);
+  });
+
+  it("fails with guidance when the snapshot cannot be parsed", async () => {
+    const { store, run } = memoryStore({ templateSnapshot: { ...snapshot, kind: "form", file: "bad.yml", content: "body: [" } });
+    await runDraftJob(RUN_ID, { store, forge: repoWithTemplate(), llm: llm([goodOutput]), models });
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/app template "Bug report" could not be read/);
   });
 });
 

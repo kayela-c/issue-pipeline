@@ -755,3 +755,29 @@ button.danger-link {
   width: auto;
   margin: 0;
 }
+
+.choice-list--inline {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 0;
+}
+
+fieldset.plain {
+  border: none;
+  padding: 0;
+  margin-inline: 0;
+}
+
+fieldset.plain legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.form-preview {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.form-preview li {
+  margin-bottom: 10px;
+}

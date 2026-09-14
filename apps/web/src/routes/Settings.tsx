@@ -1,5 +1,6 @@
 import { linkHandler } from "../lib/router";
 import { AiSettings } from "./settings/AiSettings";
+import { Templates } from "./settings/Templates";
 
 const TABS = [
   { path: "/settings/ai", label: "AI model" },
@@ -36,15 +37,7 @@ export function Settings({ pathname }: { pathname: string }) {
           </p>
         </section>
       )}
-      {current === "/settings/templates" && (
-        <section className="card">
-          <h2>Templates</h2>
-          <p className="muted">
-            Issue templates managed here arrive in the next phase. Until then, drafting follows each repository's own issue
-            templates.
-          </p>
-        </section>
-      )}
+      {current === "/settings/templates" && <Templates />}
     </>
   );
 }

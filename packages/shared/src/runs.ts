@@ -6,6 +6,8 @@ export const RAW_ISSUE_MAX_LENGTH = 20_000;
 export const createRawIssueRequestSchema = z.object({
   repo_id: z.uuid(),
   body: z.string().trim().min(1, "Describe the issue").max(RAW_ISSUE_MAX_LENGTH),
+  /** An app template (Settings > Templates) to draft with instead of the repository's own templates. */
+  template_id: z.uuid().nullable().optional(),
 });
 export type CreateRawIssueRequest = z.infer<typeof createRawIssueRequestSchema>;
 
@@ -27,6 +29,8 @@ export const runResponseSchema = z.object({
   output_tokens: z.number().int().nullable(),
   /** "provider/model" used for drafting, once the run is done. */
   model_draft: z.string().nullable(),
+  /** The app template the run drafted with, as it was when submitted; null for the repository's own templates. */
+  app_template: z.object({ name: z.string(), file: z.string(), kind: z.string() }).nullable(),
   created_at: timestamp,
   started_at: timestamp.nullable(),
   finished_at: timestamp.nullable(),

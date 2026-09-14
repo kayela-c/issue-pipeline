@@ -171,6 +171,119 @@ export function parseTemplate(path: string, content: string): IssueTemplate | un
   };
 }
 
+// --- App templates (Settings > Templates) -------------------------------------------
+
+/** The file name an app template drafts under (the drafts' template_name), e.g. "feature-task.yml". */
+export function appTemplateFile(name: string, kind: "markdown" | "form"): string {
+  const slug =
+    name
+      .normalize("NFKD")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "template";
+  return `${slug}.${kind === "form" ? "yml" : "md"}`;
+}
+
+export interface TemplateCheck {
+  /** The parsed template, when the content is usable. */
+  template?: IssueTemplate;
+  /** Problems that block saving. */
+  errors: string[];
+  /** Usable, but probably not what the author meant. */
+  warnings: string[];
+}
+
+const FIELD_TYPES = ["markdown", "textarea", "input", "dropdown", "checkboxes"];
+
+/**
+ * Check an app template the way Gitea would read it, with messages for the
+ * editor. The template takes the app template's own name and file name.
+ */
+export function checkTemplate(
+  kind: "markdown" | "form",
+  content: string,
+  options: { name?: string; forges?: readonly string[] } = {},
+): TemplateCheck {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const name = options.name?.trim() || "Untitled";
+  const file = appTemplateFile(name, kind);
+  const text = content.startsWith(String.fromCharCode(0xfeff)) ? content.slice(1) : content;
+
+  if (!text.trim()) return { errors: ["The template is empty."], warnings };
+
+  if (kind === "markdown") {
+    const template = parseTemplate(`app/${file}`, text)!;
+    if (/^---\r?\n/.test(text) && template.body === text) {
+      warnings.push("The front matter (between the --- lines) could not be read, so it is treated as part of the body.");
+    }
+    if (!template.body.trim()) errors.push("The template has front matter but no body.");
+    if (options.forges?.includes("bitbucket") && template.labels.length > 0) {
+      warnings.push("Bitbucket has no labels, so the template's labels are ignored there.");
+    }
+    return { template: { ...template, name, file }, errors, warnings };
+  }
+
+  let doc: unknown;
+  try {
+    doc = parseYaml(text);
+  } catch (err) {
+    const message = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    return { errors: [`The YAML could not be read: ${message}`], warnings };
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    return { errors: ["An issue form must be a YAML mapping with name, description, and body keys."], warnings };
+  }
+  const body = (doc as Record<string, unknown>).body;
+  if (!Array.isArray(body)) {
+    return { errors: ["An issue form needs a top-level `body:` list of fields."], warnings };
+  }
+
+  const ids = new Set<string>();
+  body.forEach((raw, index) => {
+    const where = `Field ${index + 1}`;
+    if (!raw || typeof raw !== "object") {
+      warnings.push(`${where} is not a mapping and is skipped.`);
+      return;
+    }
+    const r = raw as Record<string, unknown>;
+    const type = asString(r.type);
+    const attributes = (r.attributes ?? {}) as Record<string, unknown>;
+    const label = asString(attributes.label);
+    const named = label ? `${where} ("${label}")` : where;
+    if (!FIELD_TYPES.includes(type)) {
+      warnings.push(`${named}: type "${type || "(missing)"}" is not supported and is skipped. Use ${FIELD_TYPES.join(", ")}.`);
+      return;
+    }
+    if (type === "markdown") return;
+    const id = asString(r.id);
+    if (!id || !label) {
+      warnings.push(`${named} needs both an id and attributes.label to appear in the issue; it is skipped.`);
+      return;
+    }
+    if (ids.has(id)) errors.push(`${named}: the id "${id}" is used more than once.`);
+    ids.add(id);
+    const opts = Array.isArray(attributes.options) ? attributes.options : [];
+    if ((type === "dropdown" || type === "checkboxes") && opts.length === 0) {
+      errors.push(`${named}: a ${type} field needs attributes.options.`);
+    }
+  });
+
+  const template = parseTemplate(`app/${file}`, text);
+  if (!template) return { errors: [...errors, "The issue form could not be read."], warnings };
+  if (!template.fields.some(rendersSection)) {
+    errors.push("The form has no fields that produce sections: each needs a supported type, an id, and attributes.label.");
+  }
+  return { template: { ...template, name, file }, errors, warnings };
+}
+
+/** An app template copied onto a run, parsed for drafting. */
+export function appTemplateFromSnapshot(snapshot: { name: string; file: string; kind: "markdown" | "form"; content: string }): IssueTemplate | undefined {
+  const parsed = parseTemplate(`app/${snapshot.file}`, snapshot.content);
+  return parsed ? { ...parsed, name: snapshot.name, file: snapshot.file } : undefined;
+}
+
 /** Text of a template for the prompt: what the body must look like. */
 export function describeTemplate(t: IssueTemplate): string {
   const lines = [`Template file: ${t.file}`, `Name: ${t.name}`];

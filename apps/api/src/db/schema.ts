@@ -13,7 +13,26 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
-import { AI_PROVIDERS, DRAFT_STATUSES, RUN_STATUSES } from "@issue-pipeline/shared";
+import {
+  AI_PROVIDERS,
+  DRAFT_STATUSES,
+  FORGES,
+  RUN_STATUSES,
+  TEMPLATE_CONTENT_MAX,
+  TEMPLATE_KINDS,
+  TEMPLATE_NAME_MAX,
+  type TemplateKind,
+} from "@issue-pipeline/shared";
+
+/** An app template as copied onto a run. */
+export interface TemplateSnapshot {
+  id: string;
+  name: string;
+  file: string;
+  kind: TemplateKind;
+  content: string;
+  version: number;
+}
 
 /**
  * Schema for the issue pipeline. Mirrors docs/ARCHITECTURE.md section 4.
@@ -73,6 +92,33 @@ export const repoSnapshots = pgTable(
   (t) => [primaryKey({ columns: [t.repoId, t.commitSha] })],
 );
 
+/** Team-wide issue templates managed in Settings. */
+export const issueTemplates = pgTable(
+  "issue_templates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    /** Forges the template is offered for. */
+    forges: text("forges").array().notNull(),
+    kind: text("kind").notNull(),
+    /** Raw Markdown (with optional front matter) or YAML issue form. */
+    content: text("content").notNull(),
+    /** Optimistic concurrency for edits; bumped on every change. */
+    version: integer("version").notNull().default(1),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("issue_templates_name_key").on(t.name),
+    check("issue_templates_name_len", sql`length(${t.name}) BETWEEN 1 AND ${sql.raw(String(TEMPLATE_NAME_MAX))}`),
+    check("issue_templates_kind_check", sql`${t.kind} IN (${inList(TEMPLATE_KINDS)})`),
+    check("issue_templates_forges_check", sql`cardinality(${t.forges}) > 0 AND ${t.forges} <@ ARRAY[${inList(FORGES)}]::text[]`),
+    check("issue_templates_content_len", sql`length(${t.content}) BETWEEN 1 AND ${sql.raw(String(TEMPLATE_CONTENT_MAX))}`),
+  ],
+);
+
 export const rawIssues = pgTable(
   "raw_issues",
   {
@@ -84,6 +130,8 @@ export const rawIssues = pgTable(
       .notNull()
       .references(() => users.id),
     body: text("body").notNull(),
+    /** The app template picked when submitting, if any. The run keeps its own snapshot. */
+    templateId: uuid("template_id").references(() => issueTemplates.id, { onDelete: "set null" }),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -107,6 +155,12 @@ export const runs = pgTable(
     outputTokens: integer("output_tokens"),
     error: text("error"),
     attempts: integer("attempts").notNull().default(0),
+    /**
+     * The app template this run drafts with, copied at submission so editing
+     * or deleting the template never changes the run (retries included).
+     * Null: the repository's own templates.
+     */
+    templateSnapshot: jsonb("template_snapshot").$type<TemplateSnapshot>(),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
     startedAt: timestamptz("started_at"),
     finishedAt: timestamptz("finished_at"),
@@ -234,3 +288,4 @@ export type Draft = typeof drafts.$inferSelect;
 export type DraftDep = typeof draftDeps.$inferSelect;
 export type DraftEventRow = typeof draftEvents.$inferSelect;
 export type UserAiProviderRow = typeof userAiProviders.$inferSelect;
+export type IssueTemplateRow = typeof issueTemplates.$inferSelect;

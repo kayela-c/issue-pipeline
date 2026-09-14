@@ -6,7 +6,7 @@ import { SELECT_FILES_SYSTEM } from "../../prompts/selectFiles.v1";
 import { ForgeError, type ForgeClient } from "../forge/types";
 import { LlmOutputError, addUsage, describeLlmError, isRetryableLlmError, type LlmClient, type Usage } from "../llm";
 import { CHARS_PER_TOKEN, estimateTokens, renderFileList } from "./budget";
-import { describeTemplate, findTemplatePaths, parseTemplate, type IssueTemplate } from "./templates";
+import { appTemplateFromSnapshot, describeTemplate, findTemplatePaths, parseTemplate, type IssueTemplate } from "./templates";
 import { filterTree, findReadme, findRouting } from "./tree";
 import { normalizeDropdownAnswers, sanitizeDraft, validateDrafts, type DraftOutput, type ValidationContext } from "./validate";
 
@@ -180,8 +180,17 @@ async function draft({ run, rawIssue, repo }: ClaimedRun, deps: DraftJobDeps): P
   let usage: Usage = selection.usage;
 
   // 5. Fetch context, sized to leave room for the drafts and one repair turn.
-  const ctx: ValidationContext = { labels: snapshot.labels.map((l) => l.name), templates: snapshot.templates };
-  const templates = snapshot.templates.map(describeTemplate).join("\n\n---\n\n");
+  // An app template picked at submission replaces the repository's own templates.
+  let issueTemplates = snapshot.templates;
+  if (run.templateSnapshot) {
+    const appTemplate = appTemplateFromSnapshot(run.templateSnapshot);
+    if (!appTemplate) {
+      throw new JobFailure(`The app template "${run.templateSnapshot.name}" could not be read. Fix it in Settings and submit the notes again.`);
+    }
+    issueTemplates = [appTemplate];
+  }
+  const ctx: ValidationContext = { labels: snapshot.labels.map((l) => l.name), templates: issueTemplates };
+  const templates = issueTemplates.map(describeTemplate).join("\n\n---\n\n");
   let contextChars = MAX_CONTEXT_CHARS;
   if (contextTokens) {
     const room = charsLeft(contextTokens, 2 * llm.limits.draftOutputTokens, [

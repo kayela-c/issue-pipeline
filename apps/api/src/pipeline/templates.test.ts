@@ -1,6 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { NO_RESPONSE, describeTemplate, findTemplatePaths, parseTemplate } from "./templates";
+import {
+  NO_RESPONSE,
+  appTemplateFile,
+  appTemplateFromSnapshot,
+  checkTemplate,
+  describeTemplate,
+  findTemplatePaths,
+  parseTemplate,
+} from "./templates";
 
 // The real TrueRoster issue form, committed at the repository root.
 const featureTask = readFileSync(new URL("../../../../feature-task.yml", import.meta.url), "utf8");
@@ -76,5 +84,69 @@ describe("parseTemplate: Markdown", () => {
 
   it("falls back to the file name without front matter", () => {
     expect(parseTemplate("ISSUE_TEMPLATE/plain.md", "Describe it")).toMatchObject({ name: "plain.md", body: "Describe it" });
+  });
+});
+
+describe("app templates", () => {
+  it("derive a file name from the template name and format", () => {
+    expect(appTemplateFile("Feature / Task!", "form")).toBe("feature-task.yml");
+    expect(appTemplateFile("  Bug report ", "markdown")).toBe("bug-report.md");
+    expect(appTemplateFile("***", "markdown")).toBe("template.md");
+  });
+
+  it("accept the real TrueRoster form under the app template's name", () => {
+    const check = checkTemplate("form", featureTask, { name: "Feature task" });
+    expect(check.errors).toEqual([]);
+    expect(check.template).toMatchObject({ kind: "form", name: "Feature task", file: "feature-task.yml" });
+    expect(check.template!.fields.length).toBeGreaterThan(3);
+  });
+
+  it("report unreadable YAML, a missing body list, and forms without sections", () => {
+    expect(checkTemplate("form", "name: x\nbody: [").errors[0]).toMatch(/could not be read/);
+    expect(checkTemplate("form", "name: x").errors).toEqual(["An issue form needs a top-level `body:` list of fields."]);
+    expect(checkTemplate("form", "- a\n- b").errors[0]).toMatch(/YAML mapping/);
+    expect(checkTemplate("form", "body:\n  - type: markdown\n    attributes:\n      value: hi").errors[0]).toMatch(/no fields that produce sections/);
+  });
+
+  it("flag duplicate ids and option-less dropdowns as errors, and skipped fields as warnings", () => {
+    const yaml = [
+      "body:",
+      "  - type: input",
+      "    id: summary",
+      "    attributes: { label: Summary }",
+      "  - type: textarea",
+      "    id: summary",
+      "    attributes: { label: Details }",
+      "  - type: dropdown",
+      "    id: area",
+      "    attributes: { label: Area }",
+      "  - type: slider",
+      "    id: x",
+      "    attributes: { label: X }",
+      "  - type: input",
+      "    attributes: { label: No id }",
+    ].join("\n");
+    const check = checkTemplate("form", yaml);
+    expect(check.errors).toEqual([
+      'Field 2 ("Details"): the id "summary" is used more than once.',
+      'Field 3 ("Area"): a dropdown field needs attributes.options.',
+    ]);
+    expect(check.warnings).toHaveLength(2);
+    expect(check.warnings[0]).toMatch(/type "slider" is not supported/);
+    expect(check.warnings[1]).toMatch(/needs both an id and attributes.label/);
+  });
+
+  it("check Markdown templates: empty, unreadable front matter, Bitbucket labels", () => {
+    expect(checkTemplate("markdown", "   ").errors).toEqual(["The template is empty."]);
+    expect(checkTemplate("markdown", "---\nname: x\n---\n").errors).toEqual(["The template has front matter but no body."]);
+    expect(checkTemplate("markdown", "---\n: [\n---\nBody").warnings[0]).toMatch(/front matter/);
+    const labelled = "---\nlabels: [bug]\n---\n## Summary\n";
+    expect(checkTemplate("markdown", labelled, { forges: ["gitea"] }).warnings).toEqual([]);
+    expect(checkTemplate("markdown", labelled, { forges: ["gitea", "bitbucket"] }).warnings[0]).toMatch(/Bitbucket has no labels/);
+  });
+
+  it("parse a run's snapshot under its recorded name and file", () => {
+    const t = appTemplateFromSnapshot({ name: "Bug", file: "bug.md", kind: "markdown", content: "---\nname: Other\nlabels: [bug]\n---\n## Steps\n" });
+    expect(t).toMatchObject({ name: "Bug", file: "bug.md", kind: "markdown", labels: ["bug"], body: "## Steps\n" });
   });
 });

@@ -91,6 +91,8 @@ export function RunView({ runId }: { runId: string }) {
             <dd>{r.model_draft}</dd>
           </>
         )}
+        <dt>Template</dt>
+        <dd>{r.app_template ? `${r.app_template.name} (app template, as submitted)` : "Repository's own templates"}</dd>
         {r.input_tokens !== null && (
           <>
             <dt>Tokens</dt>
