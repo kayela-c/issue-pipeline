@@ -12,7 +12,7 @@
 2. Items marked **VERIFY** must be checked against the real Gitea instance, Netlify plan, or current docs before the code depends on them. If a VERIFY item turns out false, stop and report instead of improvising a workaround.
 3. Do not add dependencies beyond those listed without flagging them first. No LangChain or agent frameworks: AI calls go through the small clients in `apps/api/src/llm` (the `@anthropic-ai/sdk` for Anthropic and LM Studio, plain REST for Gemini).
 4. Standalone utility scripts (seeding, smoke tests, maintenance) are written in **Python**. Application code is TypeScript (API and UI).
-5. A Gitea token or API key must never be logged, stored in Postgres, placed in a URL, or made readable by browser JavaScript. The only place a user's Gitea token exists at rest is inside the encrypted, `HttpOnly` session cookie (Section 5).
+5. A token or API key must never be logged, placed in a URL, or made readable by browser JavaScript. The sign-in Gitea token exists at rest only inside the encrypted, `HttpOnly` session cookie (Section 5). Credentials a user adds in Settings (AI provider keys, and from Phase 8 forge connection tokens) are stored in Postgres **only as AES-256-GCM ciphertext** under `CREDENTIALS_KEY`, decrypted only inside the function that uses them, and never returned by the API (responses carry at most `has_key` and the last 4 characters). Changed 2026-09-14, decision 21.
 6. Keep this file ASCII-only.
 
 ---
@@ -25,7 +25,9 @@ A web app for a small team that turns rough issue notes into well-formed Gitea i
 
 **Stage 2 -- Posting (no AI).** A teammate approves drafts. An approved draft whose dependencies are all posted is claimed atomically, created in Gitea under the posting user's account, linked to its dependencies, and marked `posted` with its issue number. This stage is deterministic code only.
 
-**Non-goals for v1:** native desktop app, offline mode, GitHub support (keep the adapter seam, implement Gitea only), syncing edits back from Gitea after posting, auto-posting without approval, Excel import/export, cross-repo dependencies, sign-in on Netlify deploy previews, choosing the AI provider from the UI.
+**Non-goals for v1:** native desktop app, offline mode, syncing edits back from Gitea after posting, auto-posting without approval, Excel import/export, cross-repo dependencies, sign-in on Netlify deploy previews, signing in with anything other than Gitea.
+
+(GitHub/GitLab/Bitbucket support and choosing the AI provider from the UI were non-goals until 2026-09-14; they are now Phases 6-10, decision 21.)
 
 ---
 
@@ -45,7 +47,8 @@ Browser (React SPA, served from the same Netlify site as the API)
                                     +-- Neon Postgres    state + queue
                                     +-- Gitea REST API   read repo, post issues (as the user)
                                     +-- AI provider      Stage 1 drafting only
-                                         (LLM_PROVIDER: gemini | anthropic | lmstudio)
+                                         (per-user choice in Settings, else LLM_PROVIDER:
+                                          anthropic | gemini | openai | grok | venice | lmstudio)
 ```
 
 | Decision | Choice | Why |
@@ -58,7 +61,7 @@ Browser (React SPA, served from the same Netlify site as the API)
 | Orchestration | Plain code, no n8n | Two linear stages; one repo; versioned with the app |
 | Identity | Gitea OAuth2, **confidential** client + PKCE | No separate user system; issues are authored by the real user |
 | Access control | Membership in one Gitea org | Simple team gate |
-| AI usage | Two narrow calls in Stage 1 only, provider chosen by env var | Posting stays predictable and cheap; the team can switch providers without code changes |
+| AI usage | Two narrow calls in Stage 1 only; provider chosen per user in Settings, team default by env var | Posting stays predictable and cheap; people can bring their own provider and key without code changes |
 | Repo context | `ROUTING.md` + `README.md` at each repo root, plus the file tree | The routing map tells the model where each area of the system lives |
 | Forge access | `ForgeClient` interface, Gitea implementation | Keeps GitHub possible later without a rewrite |
 | Realtime | Polling (run detail 2 s while active; queue 3 s while anything runs, else 15 s; board 10 s, 2 s while posting) | Functions are stateless; no websockets needed |
@@ -79,7 +82,8 @@ issue-pipeline/
 |   |   |   +-- lib/api.ts            # typed fetch wrapper (same-origin, JSON, zod-parsed)
 |   |   |   +-- lib/auth.ts           # session hooks (useMe, logout, login error messages)
 |   |   |   +-- lib/router.ts         # tiny history-API router (no router dependency)
-|   |   |   +-- routes/               # Login, Home (nav), NewIssue, Queue, RunView, Board, DraftEditor, Repos
+|   |   |   +-- routes/               # Login, Home (nav), NewIssue, Queue, RunView, Board, DraftEditor, Repos, Settings
+|   |   |   +-- routes/settings/      # AiSettings (Connections and Templates arrive in Phases 7-8)
 |   |   |   +-- components/Markdown.tsx  # react-markdown, raw HTML never rendered
 |   |   +-- public/api-not-found.json # JSON 404 for unknown /api paths
 |   |   +-- vite.config.ts            # build-time CSP meta tag
@@ -100,9 +104,15 @@ issue-pipeline/
 |       |   +-- forge/gitea.ts        # Gitea implementation (retries, typed ForgeError)
 |       |   +-- forge/fake.ts         # test double
 |       |   +-- llm/types.ts          # LlmClient, limits, usage, LlmOutputError
-|       |   +-- llm/index.ts          # provider selection from env, error description/classification
+|       |   +-- llm/index.ts          # provider resolution (user settings -> team env), error description/classification
 |       |   +-- llm/anthropic.ts      # Anthropic SDK client (Anthropic API, or LM Studio's endpoint)
 |       |   +-- llm/gemini.ts         # Gemini REST client
+|       |   +-- llm/openai.ts         # OpenAI-compatible REST client (OpenAI, xAI Grok, Venice)
+|       |   +-- llm/models.ts         # live model lists for the Settings pickers
+|       |   +-- crypto/aead.ts        # AES-256-GCM core shared by session cookies and stored credentials
+|       |   +-- crypto/credentials.ts # CREDENTIALS_KEY sealing, AAD bound to column + user + subject
+|       |   +-- settings/ai.ts        # per-user AI settings DTO and llmConfigForUser
+|       |   +-- db/settings.ts        # user_ai_settings / user_ai_providers queries
 |       |   +-- pipeline/draft.ts     # Stage 1 job
 |       |   +-- pipeline/tree.ts      # tree filtering, README/ROUTING.md discovery
 |       |   +-- pipeline/templates.ts # issue template discovery + parsing
@@ -131,7 +141,7 @@ issue-pipeline/
 
 ## 4. Data model (Neon Postgres)
 
-Defined in Drizzle (`apps/api/src/db/schema.ts`); migrations are generated with `drizzle-kit` and applied with `pnpm db:migrate`. Applied so far: `0000_init`, `0001_snapshot_routing` (adds `repo_snapshots.routing` and clears cached snapshots). Statuses use `text` + `CHECK` rather than enums so they are easy to extend.
+Defined in Drizzle (`apps/api/src/db/schema.ts`); migrations are generated with `drizzle-kit` and applied with `pnpm db:migrate`. Applied so far: `0000_init`, `0001_snapshot_routing` (adds `repo_snapshots.routing` and clears cached snapshots), `0002_user_ai_settings` (Phase 6; applied to the Neon `dev` branch only, 2026-09-14 -- apply to `main` before deploying Phase 6). Statuses use `text` + `CHECK` rather than enums so they are easy to extend.
 
 There is deliberately **no sessions table**: session state lives in the encrypted cookie (Section 5).
 
@@ -219,6 +229,26 @@ CREATE TABLE drafts (
 );
 CREATE INDEX drafts_repo_status_idx ON drafts (repo_id, status);
 
+-- Phase 6: per-user AI settings. No row, or provider NULL, means the team default.
+CREATE TABLE user_ai_settings (
+  user_id     uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  provider    text CHECK (provider IS NULL OR provider IN ('anthropic','gemini','grok','openai','venice')),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- One row per provider a user has configured. api_key_enc is AES-256-GCM
+-- ciphertext under CREDENTIALS_KEY, AAD "user_ai_providers.api_key:<user_id>:<provider>".
+CREATE TABLE user_ai_providers (
+  user_id        uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider       text NOT NULL CHECK (provider IN ('anthropic','gemini','grok','openai','venice')),
+  model_select   text,                       -- NULL = team/built-in default
+  model_draft    text,
+  api_key_enc    text,                       -- NULL = use the team key for this provider
+  api_key_last4  text,
+  updated_at     timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, provider)
+);
+
 CREATE TABLE draft_deps (
   draft_id         uuid NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
   depends_on_id    uuid NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
@@ -285,7 +315,11 @@ Zero rows means the draft is not approved, has unposted dependencies, or was cla
 | Name | Purpose |
 |---|---|
 | `DATABASE_URL` | Neon connection string |
-| `LLM_PROVIDER` | `gemini`, `anthropic` (default when unset), or `lmstudio` (local development only; refuses to run when deployed). Selected by env var only: keys never pass through the UI. Switching is one line plus a restart or redeploy |
+| `LLM_PROVIDER` | The **team default**: `anthropic` (default when unset), `gemini`, `openai`, `grok`, `venice`, or `lmstudio` (local development only; refuses to run when deployed). Users who pick a provider in Settings use theirs instead (Section 6). Switching is one line plus a restart or redeploy |
+| `CREDENTIALS_KEY`, `CREDENTIALS_KEY_PREVIOUS` | 32 random bytes, base64. Encrypts API keys saved in Settings; the previous key is accepted for decryption during rotation. Needed only once someone saves a key |
+| `OPENAI_API_KEY`, `OPENAI_MODEL_SELECT`, `OPENAI_MODEL_DRAFT` | OpenAI team key and models (no built-in model ids) |
+| `XAI_API_KEY`, `XAI_MODEL_SELECT`, `XAI_MODEL_DRAFT` | xAI (Grok) team key and models (no built-in model ids) |
+| `VENICE_API_KEY`, `VENICE_MODEL_SELECT`, `VENICE_MODEL_DRAFT` | Venice team key and models (no built-in model ids) |
 | `GOOGLE_API_KEY`, `GEMINI_MODEL_SELECT`, `GEMINI_MODEL_DRAFT` | Gemini API key (Google AI Studio, with credits) and models; default `gemini-3.5-flash-lite` / `gemini-3.8-flash` |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL_SELECT`, `ANTHROPIC_MODEL_DRAFT` | Anthropic API key and models; default `claude-haiku-4-5-20251001` / `claude-sonnet-5` |
 | `LMSTUDIO_BASE_URL`, `LMSTUDIO_API_KEY`, `LMSTUDIO_MODEL_SELECT`, `LMSTUDIO_MODEL_DRAFT`, `LMSTUDIO_CONTEXT_TOKENS`, `LMSTUDIO_MAX_OUTPUT_TOKENS` | LM Studio 0.4.1+ (default `http://localhost:1234`). Model ids are required; the context length is the one the model is loaded with, and prompts are sized to fit it |
@@ -389,6 +423,11 @@ interface ForgeClient {
 | POST | `/api/drafts/:id/post` | sync | built | Post one draft now (Section 7); only throws if the claim itself is refused (409) -- every other outcome is persisted and returned in the draft |
 | POST | `/api/drafts/:id/reconcile` | sync | built | Resolve a stuck `posting`, or retry unlinked dependency links on a `posted` draft (Section 7) |
 | POST | `/api/repos/:id/post-queue` | sync -> bg | built | Trigger background posting of every ready draft in the repo |
+| GET | `/api/settings/ai` | sync | built | The caller's AI settings: chosen provider (null = team default) and, per provider, models, `has_key`, `key_last4`, whether a team key exists, default models. Never a key |
+| PUT | `/api/settings/ai` | sync | built | `{provider}` (null = team default) |
+| PUT | `/api/settings/ai/:provider` | sync | built | `{model_select, model_draft, api_key?, clear_key?}`; the key is sealed before storage and never returned |
+| GET | `/api/settings/ai/:provider/models` | sync | built | Live model list from the provider, with the caller's key or the team's; 400 when neither exists or the key is rejected |
+| POST | `/api/settings/ai/:provider/test` | sync | built | One small structured-output call per saved model; always 200 with `{ok, message}` |
 
 Errors use one shape: `{ error: { code, message, details? } }`. 409s from review writes (edit/approve/unapprove) carry `details: { reason: "status" | "stale", status, version }`. Posting endpoints use their own reason codes instead, since the failure modes differ: `post` can refuse with `status`, `unposted_deps`, or `claimed`; `reconcile` with `not_stale`. Shared zod schemas for every request/response live in `packages/shared`. No endpoint emits CORS headers.
 
@@ -449,13 +488,18 @@ Runs inside `draft-run-background`. Updates `runs.status` at each step so the UI
 
 ### AI providers (`src/llm`)
 
-Both calls go through one `LlmClient` interface; the provider is chosen by `LLM_PROVIDER`.
+Both calls go through one `LlmClient` interface. `draft-run-background` resolves the provider for the user who triggered the run (whoever submitted or retried it) with `llmConfigForUser` (`src/settings/ai.ts`):
+
+1. No provider chosen in Settings -> the team default from `LLM_PROVIDER` with its env key and models.
+2. A provider chosen -> the user's own key for it, else the team's env key for that provider; the user's models, else the provider's env models, else built-in defaults (Anthropic and Gemini only).
+3. Anything missing (no key anywhere, no models, an undecryptable saved key) is an `AiSettingsError`: the run is marked `failed` with a message saying what to fix in Settings, and it is not retried.
 
 | Provider | Transport | JSON output | Notes |
 |---|---|---|---|
 | `gemini` | REST `models/{model}:generateContent` with `x-goog-api-key` | `generationConfig.responseJsonSchema` (from the zod schema) | Thought parts ignored; the model turn (with thought signatures) replayed verbatim for the repair call. The client retries 503 "high demand", rate-limit 429s, and network errors up to 4 attempts (~2 s, 4 s, 8 s backoff). Depleted prepaid credits (429) are not retried and get a message pointing to AI Studio |
 | `anthropic` | `@anthropic-ai/sdk`, streamed | Structured outputs (`output_config.format`) | Top-level prompt caching so the repair turn re-reads the repository context cheaply. SDK retries transient errors |
-| `lmstudio` | `@anthropic-ai/sdk` pointed at LM Studio's Anthropic-compatible `/v1/messages` | Forced tool call (`tool_choice: any`) with a JSON schema | Local development only. No caching. Prompt budgeting applies (below) |
+| `lmstudio` | `@anthropic-ai/sdk` pointed at LM Studio's Anthropic-compatible `/v1/messages` | Forced tool call (`tool_choice: any`) with a JSON schema | Local development only, env only (not offered in Settings). No caching. Prompt budgeting applies (below) |
+| `openai`, `grok`, `venice` | Plain REST `POST {base}/chat/completions` with a bearer key; fixed base URLs (`api.openai.com/v1`, `api.x.ai/v1`, `api.venice.ai/api/v1`) | `response_format: {type: "json_schema", strict: false}` (strict mode rejects the draft schema's optional fields); a Markdown-fenced JSON reply is unwrapped | Token cap sent as `max_completion_tokens` (OpenAI, Venice) or `max_tokens` (xAI). Venice gets `venice_parameters.include_venice_system_prompt: false`. Retries 429 (not exhausted quota), 5xx, and network errors up to 4 attempts. The repair turn replays the assistant's JSON text |
 
 **Prompt budgeting** (`pipeline/budget.ts`) applies when the provider reports a context size (LM Studio). Tokens are estimated at ~3 characters each. The file list for the selection call shrinks from paths with sizes, to bare paths, to a ranked subset: paths named in `ROUTING.md` first, then the best name matches for the notes; the prompt says the list is partial. The drafting call's file context is sized to leave room for the drafts and one repair turn. If even the fixed prompt parts do not fit, the run fails with guidance to load the model with a larger context.
 
@@ -528,6 +572,7 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 | Board | `/board?repo=<id>` | Columns by status: Draft, Approved, Posting, Posted, Failed; repo filter (or all repos). Cards: title, repo, labels, "Blocked by N unposted drafts", issue number, approver |
 | Draft editor | `/drafts/<id>` | Status, repo, template, author, approver, Gitea link. While `draft`: title, body with Write / Preview tabs, label chips (repo labels live from Gitea), dependency checkboxes (same-repo drafts with their status), Save, Approve (disabled while there are unsaved changes), Delete with inline confirm. While `approved`: read-only view with Unapprove. "Needed by" list and event history. A stale save or approval shows **"Edited by someone else"** with Reload; the editor also polls every 15 s and flags a newer version if the form has unsaved edits |
 | Repositories | `/repos` | Tracked repos; search accessible repos and track one (disabled for archived repos or repos with issues turned off) |
+| Settings | `/settings/ai`, `/settings/connections`, `/settings/templates` | Sub-tabs. **AI model:** radio list of "Team default (<provider>)", Anthropic, Gemini, Grok, OpenAI, Venice (saved on click, badges for "your key" / "team key"). Choosing a provider shows its panel: API key (password field; a saved key shows only "ending in ...abcd" with Replace/Remove), select and draft model fields with suggestions listed live from the provider (free text allowed), Save, and Test (disabled while unsaved). A warning shows when neither the user nor the team has a key. Connections and Templates are placeholders until Phases 8 and 7 |
 | Card actions | built | Post and Unapprove on `approved` drafts, Retry on `failed`, Reconcile on `posting` (all in the draft editor); "Post all ready" on the board, scoped to the selected repo |
 
 **Markdown renders AI-written text, so it must not render raw HTML.** `components/Markdown.tsx` uses `react-markdown` with `skipHtml` and its default URL filter, and opens links in a new tab with `rel="noopener noreferrer"`. A test asserts script tags, event handlers, and `javascript:` links never reach the page. GitHub-flavoured extras (task-list checkboxes, tables) would need `remark-gfm`, not added; `- [ ]` checklists currently render as plain text in the preview.
@@ -546,7 +591,7 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 2. **Environments:** production uses the Neon project's `main` branch (its default/primary database branch); local dev (`netlify dev`) uses the Neon `dev` branch. **These are Neon database branches, unrelated to the git `main`/`dev` branches in item 1** -- both happen to use the same two names, which is a coincidence worth double-checking against whenever an instruction just says "main" or "dev." Migrations are applied with `pnpm db:migrate` before a deploy that needs them. **Done (2026-09-14):** the Neon `main` branch had zero tables (only the Neon `dev` branch had ever been migrated); `pnpm db:migrate` was run against it and all 8 tables plus `drizzle.__drizzle_migrations` now exist.
 3. **Gitea OAuth app:** confidential client with redirect URIs `https://issue-pipeline.netlify.app/api/auth/callback` and `http://localhost:8888/api/auth/callback`. **Site created (2026-09-14); redirect URI registration still outstanding** -- an admin needs to add the production URI in Gitea now that it's known.
 4. **Secrets** (`GITEA_OAUTH_CLIENT_SECRET`, `SESSION_SECRET`, `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY`, `DATABASE_URL`, `INTERNAL_JOB_SECRET`) live only in Netlify environment variables and the local, gitignored `.env`. Use different `SESSION_SECRET` values per environment. **Netlify site created** (`issue-pipeline.netlify.app`, project id in `.env` as `NETLIFY_PROJECT_ID`, set up by Kayela); **env vars not yet confirmed set**.
-5. **AI provider:** `LLM_PROVIDER` must be `gemini` or `anthropic` in production; `lmstudio` refuses to run outside `netlify dev`.
+5. **AI provider:** the team default `LLM_PROVIDER` may be any provider except `lmstudio`, which refuses to run outside `netlify dev`. Set `CREDENTIALS_KEY` (different per environment) before anyone saves a key in Settings, and apply migration `0002` to the Neon `main` branch.
 6. **Key rotation:** set the new key as `SESSION_SECRET` and the old one as `SESSION_SECRET_PREVIOUS`; remove the old key after `SESSION_MAX_AGE_DAYS`.
 7. **Deploy previews** build and serve the UI and `/api/health`, but sign-in is unsupported there (their URLs are not registered redirect URIs).
 8. **Smoke test:** `scripts/smoke_test.py` (Python, `requests`) runs the full path -- track a repo, submit notes, wait for drafting, approve, post -- against a deployed site using a bearer PAT (`pip install -r scripts/requirements.txt`, then see the script's docstring for usage). **Built, not yet run** -- needs the OAuth redirect URI and env vars in place first: `python scripts/smoke_test.py --base-url https://issue-pipeline.netlify.app --token <PAT> --owner <org> --repo <repo>`.
@@ -564,7 +609,7 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 - [ ] `/internal/*` requires `INTERNAL_JOB_SECRET` (constant-time compare).
 - [ ] Nothing posts to Gitea without an `approved` status set by a human, and approval applies only to the version the approver reviewed.
 - [ ] AI output sanitized (marker stripping, label whitelist, length limits) and Markdown rendered without raw HTML.
-- [ ] AI provider keys server-side only; provider chosen by env var, never from the UI.
+- [ ] AI provider keys server-side only. Keys saved in Settings are AES-256-GCM ciphertext bound to column, user, and provider; the API returns only `has_key` and the last 4 characters; provider base URLs are fixed, never user-supplied.
 - [ ] Per-user daily run cap enforced from the `runs` table.
 - [ ] Input size limits enforced by zod on every endpoint (request bodies capped at 64 KB).
 - [ ] No CORS headers anywhere; security headers (CSP, `frame-ancestors 'none'`, `nosniff`, referrer policy) set.
@@ -584,6 +629,7 @@ Run everything with `pnpm -r test`. Current coverage:
   - Stage 1 job with an in-memory store: key -> id mapping, snapshot reuse, one repair then failure, deterministic vs transient failures, platform retry producing drafts exactly once, last-attempt give-up, local dev single attempt, ROUTING.md reaching both calls.
   - AI clients: Anthropic structured vs tool mode, tool-result pairing on repair, stop reasons; Gemini schema requests, thought handling, repair replay, retries on 503/429, depleted credits not retried, error descriptions (including the LM Studio context-overflow message).
   - Review rules: dependency checks and refusal reasons.
+  - Stored credentials: round trip, binding to user/provider/column, previous-key rotation, tampering. Provider resolution: team default, user key and models, team-key fallback, missing key or models as `AiSettingsError`. OpenAI-compatible client: URLs, token-cap field per provider, Venice parameters, repair replay, fenced JSON, refusal/length/empty output, retries, exhausted quota not retried, error descriptions. Live model-list parsing per provider (OpenAI non-chat filtering, Venice schema capability).
   - `postDraft`/`reconcileDraft` with an in-memory store and `fakeForge`: claim refusal reasons, label id mapping and dropped-label recording, an ambiguous `createIssue` failure left `posting` instead of guessed at, a definite failure marked `failed`, a link failure recorded without undoing the post, reconcile finding (or not finding) the marker on Gitea, and retrying unlinked dependency links.
 - **Unit (vitest, `apps/web`):** API wrapper error mapping; Markdown renders structure but never raw HTML or `javascript:` links.
 - **Unit (vitest, `packages/shared`):** queue response schema accepts partial draft counts.
@@ -623,12 +669,44 @@ Each phase ends with its acceptance criteria passing and a short summary back to
 - **Accept (not yet run against a live Gitea):** the posted issue appears in Gitea authored by the posting user with the hidden marker; dependencies post first and are linked; posting a blocked draft returns 409 naming the unposted dependencies; the failure-injection test (Section 11, still not built -- needs the Docker Gitea integration environment) yields exactly one issue after reconcile.
 
 ### Phase 5 -- Production deployment -- PARTIALLY DONE
-- **Done (2026-09-14):** `netlify.toml` build config; Neon `main` database branch migrated (it is the project's default/primary branch and had never been migrated -- the Neon `dev` branch was branched off it before any schema existed); `scripts/smoke_test.py`; production Netlify site created at `https://issue-pipeline.netlify.app` (project id in `.env` as `NETLIFY_PROJECT_ID`, set up by Kayela); git's default branch renamed `main` -> `dev`, and a `prod` branch created and pushed as the Netlify production branch.
-- **Outstanding, owned by Kayela** (Gitea admin access, not the agent's): register `https://issue-pipeline.netlify.app/api/auth/callback` as a redirect URI on the Gitea OAuth app; confirm production environment variables are set on the Netlify site (Section 9 item 4).
+- **Done (2026-09-14):** `netlify.toml` build config; Neon `main` database branch migrated (it is the project's default/primary branch and had never been migrated -- the Neon `dev` branch was branched off it before any schema existed); `scripts/smoke_test.py`; production Netlify site created at `https://issue-pipeline.netlify.app` (project id in `.env` as `NETLIFY_PROJECT_ID`, set up by Kayela); SPA and `/api` routing confirmed in production. Git layout is `main` = production, `dev` = ongoing work (decision 20).
+- **Blocked (2026-09-14): production sign-in.** The production redirect URI is registered, but Cloudflare in front of `git.konceptkit.com` answers Netlify Functions' server-side requests with 403 (non-JSON body), so the OAuth code exchange fails (`error=failed`, log "Gitea returned 403"). Requests from a developer machine pass, which is why `netlify dev` never showed it. Every server-side Gitea call from Netlify is affected, not only OAuth. Netlify Functions have no static IPs, so the fix is a Cloudflare-side rule: find the blocking rule under Security > Events; Bot Fight Mode on the free plan cannot be bypassed by WAF rules and may need to be switched off.
+- **Outstanding, owned by Kayela:** the Cloudflare rule above; confirm production environment variables on the Netlify site (Section 9 item 4); re-add `http://localhost:8888/api/auth/callback` to the Gitea OAuth app (it was removed when the production URI was added).
 - **Accept:** sign-in works on the production URL; the smoke test passes against production.
 
-### Phase 6 -- Hardening
-- Rate limits, per-run token/cost display, audit history view, structured logging with token redaction, session key rotation drill, local Gitea integration tests.
+Phases 6-10 add a **Settings** tab (decision 21). Settings are built and tested under `netlify dev` while production sign-in is blocked (Phase 5).
+
+### Phase 6 -- Settings shell and per-user AI settings -- BUILT, awaiting acceptance (uncommitted)
+- `CREDENTIALS_KEY` and encrypted credential columns (AES-256-GCM, AAD `"<table>:<column>:<user id>"`, previous key accepted during rotation), sharing its cipher core with the session cookie.
+- Providers: Anthropic, Gemini, and an OpenAI-compatible REST client for OpenAI, xAI Grok, and Venice (fixed base URLs, `response_format: json_schema`). LM Studio stays env-only and dev-only.
+- `user_ai_settings` table. The client for a run is resolved for the user who triggered it: their provider with their own key -> their provider with the team's env key -> the env provider (today's behaviour) -> an error telling them to add a key.
+- `GET/PUT/DELETE /api/settings/ai` (key write-only), `GET /api/settings/ai/models?provider=`, `POST /api/settings/ai/test`.
+- Web: Settings nav item, `/settings/ai` page: provider choice; picking one shows its API key field (saved keys show only the last 4 characters) and the select/draft model pickers.
+- Deviations from the plan: the Test endpoint is not rate-limited yet (each click makes up to two small model calls on the caller's own key or the team's; rate limits are Phase 11 work). A retry uses the settings of whoever retries, since the job runs as the triggering user.
+- **Accept:** a user with their own key for a new provider runs drafting and `runs.model_draft` names that provider; a user with no settings still uses the env provider; no key appears in any API response or log line.
+
+### Phase 7 -- Issue templates in Settings
+- `issue_templates` (team-wide; forges it applies to; Markdown or YAML form; raw content), CRUD with optimistic `version`, server-side preview through `pipeline/templates.ts`.
+- Format options by forge: Gitea and GitHub offer Markdown or a YAML issue form; GitLab and Bitbucket offer Markdown only.
+- New issue modal picks "Repo's templates" (default) or an app template; the run snapshots the app template it used.
+- **Accept:** a YAML form made in Settings drives drafting and validation on a Gitea repo; editing it later does not change old runs.
+
+### Phase 8 -- Forge connections and GitHub
+- Forge-neutral columns (`repos.forge`/`base_url`, `drafts.issue_number`/`issue_url`, `draft_deps.linked_in_forge`) and `ForgeClient.capabilities` (labels, dependencies, issue forms, template dirs).
+- `forge_connections`: OAuth "Connect" per forge, tokens encrypted, refresh by compare-and-swap on `token_version` so rotating refresh tokens survive concurrent requests. Gitea sign-in and the org gate are unchanged.
+- `GitHubForge` through a GitHub App (Issues write, Contents read, Metadata). A repo on a forge the caller has not connected answers 409 `not_connected`.
+- **Accept:** connect GitHub, track a private repo, draft, approve, post as the user, dependencies linked or skipped with a recorded reason, reconcile finds a stuck post; a teammate without a connection gets the connect message.
+
+### Phase 9 -- GitLab
+- `GitLabForge` (gitlab.com plus optional `GITLAB_BASE_URL`), Markdown description templates, issue links for dependencies, quick-action lines neutralized in AI-written bodies.
+- **Accept:** the Phase 8 flow on a GitLab project; quick-action sanitizing covered by a unit test.
+
+### Phase 10 -- Bitbucket Cloud
+- `BitbucketForge` with no labels, dependencies, or repo templates (app Markdown templates only); the UI says what is unsupported.
+- **Accept:** draft and post to a Bitbucket repo with an app template.
+
+### Phase 11 -- Hardening
+- Rate limits, per-run token/cost display, audit history view, structured logging with token redaction, session and credential key rotation drill, local Gitea integration tests.
 - **Accept:** security checklist in Section 10 fully ticked.
 
 ---
@@ -662,6 +740,8 @@ Resolved:
 19. **`SECRETS_SCAN_OMIT_KEYS` added to `netlify.toml` (2026-09-14):** the first production deploy failed Netlify's secrets scan. It flags every env var configured on the site and fails the build if that literal value appears anywhere in the repo or build output; `GITEA_BASE_URL`, `GITEA_ALLOWED_ORG`, and `NODE_ENV` are legitimately non-secret and their values (an org name, a host, a build mode) collide with ordinary text throughout the code, tests, and this doc. `MODEL_SELECT` and `MODEL_DRAFT` were also flagged -- these are not env vars the app reads at all (see Section 5: the app reads `ANTHROPIC_MODEL_SELECT`/`ANTHROPIC_MODEL_DRAFT` or `GEMINI_MODEL_SELECT`/`GEMINI_MODEL_DRAFT`, prefixed by provider), so they were added to the omit list rather than chased down as real config. Real secrets (API keys, `SESSION_SECRET`, `DATABASE_URL`, `GITEA_OAUTH_CLIENT_SECRET`, `INTERNAL_JOB_SECRET`) are untouched and stay scanned.
 20. **Git branch layout settled as `main` (production) + `dev` (ongoing work), no `prod` branch (2026-09-14):** same-day back-and-forth. First, Netlify's production branch was set to a new `prod` branch, and git's `main` was renamed to `dev` to match (pushed as `origin/dev`; `origin/main` was left behind, briefly stale). Kayela then deleted `prod` and decided to keep the conventional `main` = production / `dev` = ongoing-work split instead. Net effect: git `main` still exists and is production again; git `dev` also exists (it carries the same history, since it was the renamed `main`) and is where ongoing work happens; `origin/prod` should be deleted if it still exists. GitHub's repository default-branch setting was never changed from `main` (the agent has no `gh` CLI or API access, so this would have been a manual step regardless), which conveniently matches the final decision. Git's `dev` branch is unrelated to the Neon *database* branch also called `dev` (item 2 above) -- same name, different systems, worth double-checking against in any future instruction that just says "dev."
 
+21. **Settings tab (2026-09-14):** Kayela asked for a Settings tab with per-user AI provider/model/key selection (Anthropic, Gemini, Grok, OpenAI, Venice), connections to GitHub, GitLab, and Bitbucket in addition to Gitea, and issue templates managed in the app. Choices: AI settings are per user with the env-var setup as the team fallback; Gitea sign-in and the org gate remain the only way in, other forges are OAuth "Connect" connections used for repo reads and posting; templates live in the database and a repo's own templates stay the default. This reverses rule 0.5 (credentials may now be stored, encrypted) and two v1 non-goals (Section 1). Venice (decision 10) is now supported through the OpenAI-compatible client. Built as Phases 6-10; hardening moves to Phase 11.
+
 Still to verify or decide before the phase that depends on them:
 
 | Item | Needed by | Status |
@@ -675,3 +755,6 @@ Still to verify or decide before the phase that depends on them:
 | Issue dependencies enabled on each target repo | Phase 4 acceptance | Outstanding -- not verified against a real Gitea in this session |
 | Dependency links inside the template's "Dependencies / blockers" section vs. an appended line | Future | Open; Phase 4 shipped with the simple appended `**Depends on:**` line |
 | Whether to add `remark-gfm` so checklists and tables render in the preview | Phase 3 follow-up | Open |
+| Cloudflare lets Netlify Functions reach `git.konceptkit.com` | Phase 5 | **Blocking production sign-in** -- see Phase 5 |
+| OpenAI, xAI, and Venice accept `response_format: json_schema` on chat completions | Phase 6 | Docs checked 2026-09-14: all three document it (xAI labels chat completions "legacy" but still serves it; Venice support can vary by model). Token cap parameter: `max_completion_tokens` for OpenAI and Venice, `max_tokens` for xAI. Still to confirm with a live call per provider |
+| GitHub issue-dependency REST API; GitLab `blocks` link tier; Bitbucket Cloud issues API still offered | Phases 8-10 | Open |

@@ -1,5 +1,5 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { z } from "zod";
+import { decrypt, encrypt, keyringFromEnvVars, type Keyring } from "../crypto/aead";
 
 /**
  * Stateless sessions: the session lives in an AES-256-GCM encrypted,
@@ -12,10 +12,6 @@ export const OAUTH_COOKIE = "__Host-ip_oauth";
 
 /** Login-state cookie lifetime: long enough to sign in, short enough to go stale. */
 export const OAUTH_STATE_MAX_AGE_SECONDS = 600;
-
-const FORMAT_PREFIX = "v1.";
-const IV_BYTES = 12;
-const TAG_BYTES = 16;
 
 export const sessionSchema = z.object({
   uid: z.uuid(),
@@ -38,30 +34,10 @@ export const oauthStateSchema = z.object({
 });
 export type OAuthState = z.infer<typeof oauthStateSchema>;
 
-/** The current key, plus an optional previous key accepted during rotation. */
-export interface Keyring {
-  current: Buffer;
-  previous?: Buffer;
-}
-
-function parseKey(name: string, value: string | undefined): Buffer | undefined {
-  if (!value) return undefined;
-  const key = Buffer.from(value, "base64");
-  if (key.length !== 32) {
-    throw new Error(`${name} must be 32 bytes encoded as base64`);
-  }
-  return key;
-}
+export type { Keyring };
 
 export function keyringFromEnv(): Keyring {
-  const current = parseKey("SESSION_SECRET", process.env.SESSION_SECRET);
-  if (!current) {
-    throw new Error("SESSION_SECRET is not set");
-  }
-  return {
-    current,
-    previous: parseKey("SESSION_SECRET_PREVIOUS", process.env.SESSION_SECRET_PREVIOUS),
-  };
+  return keyringFromEnvVars("SESSION_SECRET");
 }
 
 export function sessionMaxAgeSecondsFromEnv(): number {
@@ -76,14 +52,7 @@ export const nowSeconds = () => Math.floor(Date.now() / 1000);
  * data, so a value sealed for one cookie cannot be replayed as the other.
  */
 export function seal(cookieName: string, payload: unknown, keys: Keyring): string {
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv("aes-256-gcm", keys.current, iv);
-  cipher.setAAD(Buffer.from(cookieName));
-  const ciphertext = Buffer.concat([
-    cipher.update(JSON.stringify(payload), "utf8"),
-    cipher.final(),
-  ]);
-  return FORMAT_PREFIX + Buffer.concat([iv, ciphertext, cipher.getAuthTag()]).toString("base64url");
+  return encrypt(JSON.stringify(payload), cookieName, keys);
 }
 
 /** Decrypt and validate; `undefined` for anything tampered, stale-keyed, or malformed. */
@@ -93,28 +62,14 @@ export function unseal<T>(
   keys: Keyring,
   schema: z.ZodType<T>,
 ): T | undefined {
-  if (!value?.startsWith(FORMAT_PREFIX)) return undefined;
-  const raw = Buffer.from(value.slice(FORMAT_PREFIX.length), "base64url");
-  if (raw.length <= IV_BYTES + TAG_BYTES) return undefined;
-
-  const iv = raw.subarray(0, IV_BYTES);
-  const tag = raw.subarray(raw.length - TAG_BYTES);
-  const ciphertext = raw.subarray(IV_BYTES, raw.length - TAG_BYTES);
-
-  for (const key of [keys.current, keys.previous]) {
-    if (!key) continue;
-    try {
-      const decipher = createDecipheriv("aes-256-gcm", key, iv);
-      decipher.setAAD(Buffer.from(cookieName));
-      decipher.setAuthTag(tag);
-      const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-      const parsed = schema.safeParse(JSON.parse(plaintext.toString("utf8")));
-      return parsed.success ? parsed.data : undefined;
-    } catch {
-      // Wrong key or tampered value: try the next key.
-    }
+  const plaintext = decrypt(value, cookieName, keys);
+  if (plaintext === undefined) return undefined;
+  try {
+    const parsed = schema.safeParse(JSON.parse(plaintext));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
   }
-  return undefined;
 }
 
 // --- Cookie headers ------------------------------------------------------------

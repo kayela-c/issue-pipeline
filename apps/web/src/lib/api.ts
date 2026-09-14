@@ -1,4 +1,7 @@
 import {
+  aiModelListResponseSchema,
+  aiSettingsResponseSchema,
+  aiTestResponseSchema,
   apiErrorSchema,
   createRawIssueResponseSchema,
   draftDetailSchema,
@@ -11,6 +14,10 @@ import {
   repoSchema,
   runListResponseSchema,
   runResponseSchema,
+  type AiModel,
+  type AiProvider,
+  type AiSettingsResponse,
+  type AiTestResponse,
   type ApiErrorCode,
   type Draft,
   type DraftDetail,
@@ -20,6 +27,7 @@ import {
   type Repo,
   type RunResponse,
   type RunSummary,
+  type UpdateAiProviderRequest,
   type UpdateDraftRequest,
 } from "@issue-pipeline/shared";
 import { z } from "zod";
@@ -197,4 +205,26 @@ export function reconcileDraft(id: string): Promise<DraftDetail> {
 
 export async function postQueue(repoId: string): Promise<void> {
   await request("POST", `/api/repos/${encodeURIComponent(repoId)}/post-queue`, z.object({}), {});
+}
+
+// --- Settings ---------------------------------------------------------------------
+
+export function getAiSettings(): Promise<AiSettingsResponse> {
+  return request("GET", "/api/settings/ai", aiSettingsResponseSchema);
+}
+
+export function selectAiProvider(provider: AiProvider | null): Promise<AiSettingsResponse> {
+  return request("PUT", "/api/settings/ai", aiSettingsResponseSchema, { provider });
+}
+
+export function updateAiProvider(provider: AiProvider, update: UpdateAiProviderRequest): Promise<AiSettingsResponse> {
+  return request("PUT", `/api/settings/ai/${provider}`, aiSettingsResponseSchema, update);
+}
+
+export async function listAiModels(provider: AiProvider): Promise<AiModel[]> {
+  return (await request("GET", `/api/settings/ai/${provider}/models`, aiModelListResponseSchema)).models;
+}
+
+export function testAiProvider(provider: AiProvider): Promise<AiTestResponse> {
+  return request("POST", `/api/settings/ai/${provider}/test`, aiTestResponseSchema, {});
 }

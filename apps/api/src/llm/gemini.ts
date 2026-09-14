@@ -91,7 +91,7 @@ export function describeGeminiError(err: unknown): string | undefined {
     return `The prompt is larger than the model context window: ${err.message.slice(0, 300)}`;
   }
   if (err.status === 400 && /api key/i.test(err.message)) {
-    return "The Google API key was rejected. Check GOOGLE_API_KEY.";
+    return "The Google API key was rejected. Check the key in Settings (or GOOGLE_API_KEY for the team default).";
   }
   if (err.status === 403) return `The Google API key is not allowed to use this model: ${err.message.slice(0, 300)}`;
   if (err.status === 404) return `Gemini model not found: ${err.message.slice(0, 300)}`;

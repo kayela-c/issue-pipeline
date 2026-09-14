@@ -13,7 +13,7 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
-import { DRAFT_STATUSES, RUN_STATUSES } from "@issue-pipeline/shared";
+import { AI_PROVIDERS, DRAFT_STATUSES, RUN_STATUSES } from "@issue-pipeline/shared";
 
 /**
  * Schema for the issue pipeline. Mirrors docs/ARCHITECTURE.md section 4.
@@ -186,6 +186,45 @@ export const draftEvents = pgTable("draft_events", {
   createdAt: timestamptz("created_at").notNull().defaultNow(),
 });
 
+/** Which AI provider a user drafts with; a null provider (or no row) means the team default. */
+export const userAiSettings = pgTable(
+  "user_ai_settings",
+  {
+    userId: uuid("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider"),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("user_ai_settings_provider_check", sql`${t.provider} IS NULL OR ${t.provider} IN (${inList(AI_PROVIDERS)})`),
+  ],
+);
+
+/**
+ * A user's models and optional own API key, per provider. The key is stored
+ * only as AES-256-GCM ciphertext (src/crypto/credentials.ts) bound to this
+ * user and provider; the last four characters are kept for display.
+ */
+export const userAiProviders = pgTable(
+  "user_ai_providers",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    modelSelect: text("model_select"),
+    modelDraft: text("model_draft"),
+    apiKeyEnc: text("api_key_enc"),
+    apiKeyLast4: text("api_key_last4"),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.provider] }),
+    check("user_ai_providers_provider_check", sql`${t.provider} IN (${inList(AI_PROVIDERS)})`),
+  ],
+);
+
 export type User = typeof users.$inferSelect;
 export type Repo = typeof repos.$inferSelect;
 export type RepoSnapshot = typeof repoSnapshots.$inferSelect;
@@ -194,3 +233,4 @@ export type Run = typeof runs.$inferSelect;
 export type Draft = typeof drafts.$inferSelect;
 export type DraftDep = typeof draftDeps.$inferSelect;
 export type DraftEventRow = typeof draftEvents.$inferSelect;
+export type UserAiProviderRow = typeof userAiProviders.$inferSelect;

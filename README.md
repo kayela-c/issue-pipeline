@@ -59,14 +59,21 @@ LIVE_LLM=1 pnpm --filter @issue-pipeline/api exec vitest run src/llm   # configu
 
 ### Choosing the AI provider
 
-`LLM_PROVIDER` in `.env` picks who drafts issues; each provider keeps its own
-settings, so switching is one line plus a restart of `pnpm dev`:
+Each user can pick a provider, models, and their own API key under
+**Settings > AI model**. Saved keys are encrypted with `CREDENTIALS_KEY` and
+never shown again. Users who keep "Team default" use `LLM_PROVIDER` from
+`.env`; each provider keeps its own settings, so switching the team default is
+one line plus a restart of `pnpm dev`. A provider's env key and models are
+also the fallback for users who pick it without adding their own key.
 
 | `LLM_PROVIDER` | Needs | Notes |
 |---|---|---|
 | `anthropic` | `ANTHROPIC_API_KEY` | Structured outputs + prompt caching |
 | `gemini` | `GOOGLE_API_KEY` (Google AI Studio, with credits) | Called over REST with a JSON schema |
-| `lmstudio` | LM Studio 0.4.1+ running locally, `LMSTUDIO_MODEL_*`, `LMSTUDIO_CONTEXT_TOKENS` | Local development only; prompts are sized to the loaded context length |
+| `openai` | `OPENAI_API_KEY`, `OPENAI_MODEL_*` | OpenAI-compatible chat completions with a JSON schema |
+| `grok` | `XAI_API_KEY`, `XAI_MODEL_*` | Same client as OpenAI |
+| `venice` | `VENICE_API_KEY`, `VENICE_MODEL_*` | Same client; pick a model that supports response schemas |
+| `lmstudio` | LM Studio 0.4.1+ running locally, `LMSTUDIO_MODEL_*`, `LMSTUDIO_CONTEXT_TOKENS` | Local development only, not offered in Settings; prompts are sized to the loaded context length |
 
 Each run records `provider/model` and the run page shows it.
 
@@ -112,8 +119,8 @@ Drafting reads two files from the root of each tracked repository:
 One Netlify site builds `main` and serves both the SPA and the API — see
 [section 9 of the architecture doc](docs/ARCHITECTURE.md) for environment
 variables, the Gitea OAuth redirect URIs, and provider constraints
-(`LLM_PROVIDER` must be `gemini` or `anthropic`; `lmstudio` only runs under
-`netlify dev`). After a deploy, verify the happy path end-to-end:
+(`lmstudio` only runs under `netlify dev`; set `CREDENTIALS_KEY` so users can
+save API keys in Settings). After a deploy, verify the happy path end-to-end:
 
 ```sh
 pip install -r scripts/requirements.txt

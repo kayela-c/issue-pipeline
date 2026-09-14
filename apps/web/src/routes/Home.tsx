@@ -6,11 +6,13 @@ import { linkHandler, replace, usePathname } from "../lib/router";
 import { DraftEditor } from "./DraftEditor";
 import { NewIssue } from "./NewIssue";
 import { Repos } from "./Repos";
+import { Settings } from "./Settings";
 import { Workflow } from "./Workflow";
 
 const NAV = [
   { path: "/queue", label: "Queue" },
   { path: "/repos", label: "Repositories" },
+  { path: "/settings/ai", label: "Settings" },
 ];
 
 export function Home({ me }: { me: MeResponse }) {
@@ -21,7 +23,8 @@ export function Home({ me }: { me: MeResponse }) {
   const queueMatch = pathname.match(/^\/(queue|runs)(?:\/([0-9a-f-]{36}))?$/i);
   const selectedRunId = queueMatch?.[2];
   const draftId = pathname.match(/^\/drafts\/([0-9a-f-]{36})$/i)?.[1];
-  const section = pathname === "/repos" ? "/repos" : "/queue";
+  const isSettings = pathname === "/settings" || pathname.startsWith("/settings/");
+  const section = pathname === "/repos" ? "/repos" : isSettings ? "/settings/ai" : "/queue";
 
   // Old links: /runs -> /queue, /board -> /queue (repo filter preserved), / -> /queue (New issue is now a modal).
   useEffect(() => {
@@ -61,6 +64,8 @@ export function Home({ me }: { me: MeResponse }) {
         <DraftEditor key={draftId} draftId={draftId} />
       ) : pathname === "/repos" ? (
         <Repos />
+      ) : isSettings ? (
+        <Settings pathname={pathname} />
       ) : (
         <Workflow />
       )}

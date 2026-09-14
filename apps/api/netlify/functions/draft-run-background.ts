@@ -5,7 +5,8 @@ import { getSnapshot, saveSnapshot, updateDefaultBranch } from "../../src/db/rep
 import { claimRun, commitDrafts, failRun, setRunProgress } from "../../src/db/runs";
 import { apiError, json } from "../../src/http";
 import { hasValidJobSecret } from "../../src/jobs";
-import { llmClientFromEnv, modelsFromEnv } from "../../src/llm";
+import { AiSettingsError, createLlmClient, recordedModels } from "../../src/llm";
+import { llmConfigForUser } from "../../src/settings/ai";
 import { TransientJobError, runDraftJob } from "../../src/pipeline/draft";
 
 const bodySchema = z.object({ run_id: z.uuid() });
@@ -37,13 +38,26 @@ export default async (req: Request, context: Context) => {
   const runId = parsed.data.run_id;
 
   let retryable: unknown;
-  const handler = withAuth(async (_req, { forge }) => {
+  const handler = withAuth(async (_req, { forge, user }) => {
+    // The AI provider, key, and models of the user who triggered this run
+    // (their Settings, else the team default).
+    let llm, llmConfig;
+    try {
+      llmConfig = await llmConfigForUser(user.id);
+      llm = createLlmClient(llmConfig);
+    } catch (err) {
+      if (!(err instanceof AiSettingsError)) throw err;
+      await failRun(runId, err.message);
+      log("ai settings unusable", { runId });
+      return json({ outcome: "failed" });
+    }
+
     try {
       const result = await runDraftJob(runId, {
         store,
         forge,
-        llm: llmClientFromEnv(),
-        models: modelsFromEnv().recorded,
+        llm,
+        models: recordedModels(llmConfig),
         // netlify dev does not replay failed background functions.
         maxAttempts: process.env.NETLIFY_DEV === "true" ? 1 : undefined,
         log,
