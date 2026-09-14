@@ -187,4 +187,102 @@ describe.skipIf(!live)("runs store (live database)", async () => {
       expect(await d.getDraftDetail(target.id)).toBeUndefined();
     });
   });
+
+  describe("posting", () => {
+    const drafts = () => import("./drafts");
+    const detail = async (id: string) => (await (await drafts()).getDraftDetail(id))!;
+    const p1 = randomUUID();
+    const p2 = randomUUID();
+
+    beforeAll(async () => {
+      const db = getDb();
+      await db.insert(schema.drafts).values([
+        { id: p1, repoId: ids.repo, title: "Schema", body: "Body", status: "approved", createdBy: ids.user, approvedBy: ids.user },
+        { id: p2, repoId: ids.repo, title: "Endpoint", body: "Body", status: "approved", createdBy: ids.user, approvedBy: ids.user },
+      ]);
+      await db.insert(schema.draftDeps).values({ draftId: p2, dependsOnId: p1 });
+    });
+
+    it("finds the oldest ready draft, skipping one with an unposted dependency", async () => {
+      const d = await drafts();
+      expect(await d.findReadyDraftId(ids.repo)).toBe(p1);
+      expect(await d.claimDraftForPosting(p2, ids.user)).toBe(false);
+    });
+
+    it("claims approved -> posting exactly once, then posts it", async () => {
+      const d = await drafts();
+      expect(await d.claimDraftForPosting(p1, ids.user)).toBe(true);
+      expect(await d.claimDraftForPosting(p1, ids.user)).toBe(false);
+      expect((await detail(p1)).status).toBe("posting");
+
+      expect(
+        await d.markDraftPosted({ id: p1, actorId: ids.user, giteaNumber: 101, giteaUrl: "https://git.example/o/r/issues/101", droppedLabels: ["ghost"] }),
+      ).toBe(true);
+      const after = await detail(p1);
+      expect(after).toMatchObject({ status: "posted", gitea_number: 101, gitea_url: "https://git.example/o/r/issues/101" });
+      expect(after.events[0]).toMatchObject({ event: "posted", detail: { gitea_number: 101, dropped_labels: ["ghost"] } });
+    });
+
+    it("marks a failed post and lets it be retried back to approved", async () => {
+      const d = await drafts();
+      expect(await d.findReadyDraftId(ids.repo)).toBe(p2); // p1 is now posted, so p2 is ready
+      expect(await d.claimDraftForPosting(p2, ids.user)).toBe(true);
+
+      expect(await d.markDraftFailed({ id: p2, actorId: ids.user, error: "Gitea returned 422" })).toBe(true);
+      expect(await detail(p2)).toMatchObject({ status: "failed", last_error: "Gitea returned 422" });
+
+      expect(await d.retryFailedDraft(p2)).toBe(true);
+      expect(await d.retryFailedDraft(p2)).toBe(false); // no longer failed
+      expect(await detail(p2)).toMatchObject({ status: "approved", last_error: null });
+    });
+
+    it("reconciles a stuck posting by searching for it on Gitea", async () => {
+      const d = await drafts();
+      expect(await d.claimDraftForPosting(p2, ids.user)).toBe(true);
+
+      const stale = new Date(Date.now() - 6 * 60_000);
+      await getDb().update(schema.drafts).set({ claimedAt: stale }).where(eq(schema.drafts.id, p2));
+
+      const ctx = await d.getReconcileContext(p2);
+      expect(ctx).toMatchObject({ status: "posting", claimedByUsername: expect.stringMatching(/^live-test-/), repoOwner: "live-test" });
+      expect(new Date(ctx!.claimedAt!).getTime()).toBe(stale.getTime());
+
+      // Found on Gitea: reconcile marks it posted rather than risking a duplicate.
+      expect(await d.reconcileToPosted({ id: p2, actorId: ids.user, giteaNumber: 202, giteaUrl: "https://git.example/o/r/issues/202" })).toBe(true);
+      expect(await d.reconcileToPosted({ id: p2, actorId: ids.user, giteaNumber: 202, giteaUrl: "u" })).toBe(false);
+      const after = await detail(p2);
+      expect(after).toMatchObject({ status: "posted", gitea_number: 202 });
+      expect(after.events[0]).toMatchObject({ event: "reconciled", detail: { outcome: "posted", gitea_number: 202 } });
+    });
+
+    it("returns a stuck posting to approved when reconcile finds nothing on Gitea", async () => {
+      const d = await drafts();
+      const p3 = randomUUID();
+      await getDb()
+        .insert(schema.drafts)
+        .values({ id: p3, repoId: ids.repo, title: "Ghost", body: "Body", status: "approved", createdBy: ids.user, approvedBy: ids.user });
+      expect(await d.claimDraftForPosting(p3, ids.user)).toBe(true);
+
+      expect(await d.reconcileToApproved({ id: p3, actorId: ids.user })).toBe(true);
+      expect(await d.reconcileToApproved({ id: p3, actorId: ids.user })).toBe(false);
+      const after = await detail(p3);
+      expect(after).toMatchObject({ status: "approved", version: expect.any(Number) });
+      expect(after.events[0]).toMatchObject({ event: "reconciled", detail: { outcome: "approved" } });
+    });
+
+    it("marks a dependency linked, records a link failure, and logs reconciled link retries", async () => {
+      const d = await drafts();
+      const ctx = await d.getReconcileContext(p2);
+      expect(ctx!.unlinkedDeps).toEqual([{ dependsOnId: p1, giteaNumber: 101 }]);
+
+      await d.markDependencyLinked(p2, p1);
+      expect((await d.getReconcileContext(p2))!.unlinkedDeps).toEqual([]);
+
+      await d.recordLinkFailed({ draftId: p2, actorId: ids.user, dependsOnId: p1, error: "dependencies not enabled" });
+      await d.recordReconciledLinks({ id: p2, actorId: ids.user, linked: 1, stillFailing: 1 });
+      const after = await detail(p2);
+      expect(after.events[0]).toMatchObject({ event: "reconciled", detail: { outcome: "links", linked: 1, still_failing: 1 } });
+      expect(after.events[1]).toMatchObject({ event: "link_failed", detail: { depends_on_id: p1 } });
+    });
+  });
 });

@@ -180,3 +180,21 @@ export async function deleteDraft(id: string): Promise<void> {
 export async function getRepoLabels(repoId: string): Promise<Array<{ id: number; name: string }>> {
   return (await request("GET", `/api/repos/${encodeURIComponent(repoId)}/labels`, repoLabelsResponseSchema)).labels;
 }
+
+// --- Posting ----------------------------------------------------------------------
+
+export function retryDraft(id: string): Promise<DraftDetail> {
+  return request("POST", `/api/drafts/${encodeURIComponent(id)}/retry`, draftDetailSchema, {});
+}
+
+export function postDraft(id: string): Promise<DraftDetail> {
+  return request("POST", `/api/drafts/${encodeURIComponent(id)}/post`, draftDetailSchema, {});
+}
+
+export function reconcileDraft(id: string): Promise<DraftDetail> {
+  return request("POST", `/api/drafts/${encodeURIComponent(id)}/reconcile`, draftDetailSchema, {});
+}
+
+export async function postQueue(repoId: string): Promise<void> {
+  await request("POST", `/api/repos/${encodeURIComponent(repoId)}/post-queue`, z.object({}), {});
+}

@@ -25,7 +25,9 @@ export function refusal(current: DraftState | undefined, expected: DraftStatus, 
         ? "This draft is approved, so it is read-only. Unapprove it to make changes."
         : expected === "approved"
           ? `Only approved drafts can be unapproved; this draft is ${current.status}.`
-          : `This draft is ${current.status}, so it can no longer be changed.`;
+          : expected === "failed"
+            ? `Only failed drafts can be retried; this draft is ${current.status}.`
+            : `This draft is ${current.status}, so it can no longer be changed.`;
     return new HttpError("conflict", message, { reason: "status", status: current.status, version: current.version });
   }
   if (version !== undefined && current.version !== version) {

@@ -110,7 +110,7 @@ issue-pipeline/
 |       |   +-- pipeline/validate.ts  # AI output validation, dropdown snapping, sanitizing
 |       |   +-- pipeline/graph.ts     # cycle detection
 |       |   +-- pipeline/review.ts    # review rules: dependency checks, refusal reasons
-|       |   +-- pipeline/post.ts      # Stage 2 (Phase 4, not yet built)
+|       |   +-- pipeline/post.ts      # Stage 2: postDraft, reconcileDraft
 |       +-- prompts/                  # versioned prompts as TS string modules
 |       +-- drizzle/                  # generated migrations (0000_init, 0001_snapshot_routing)
 |       +-- drizzle.config.ts
@@ -258,7 +258,7 @@ Rules enforced in the API, not just the UI:
 
 **How the rules hold under concurrency.** The Neon HTTP driver has no interactive transactions, so every change is a single guarded statement (`UPDATE ... WHERE status = ... AND version = ... RETURNING`), and its `draft_events` row is inserted from that statement's `RETURNING` in a data-modifying CTE. A refused change therefore writes nothing; the API re-reads the draft and answers 404, or 409 with `details.reason` of `status` (wrong state) or `stale` (someone else saved first). A dependency change runs as a transaction that ends with a recursive reachability query dividing by zero when the draft can reach itself, so two concurrent changes that together form a cycle are rolled back even though each passed the application check.
 
-### Atomic claim (the only way a draft enters `posting`) -- Phase 4
+### Atomic claim (the only way a draft enters `posting`)
 
 ```sql
 UPDATE drafts d
@@ -344,8 +344,6 @@ Tokens are held in memory for the request only. Log paths and statuses, never he
 
 ### `ForgeClient` interface (`src/forge/types.ts`)
 
-Implemented now:
-
 ```ts
 interface ForgeClient {
   getCurrentUser(): Promise<{ id: number; username: string; fullName?: string }>;
@@ -356,18 +354,13 @@ interface ForgeClient {
   getTree(owner: string, repo: string, sha: string): Promise<TreeEntry[]>;     // blobs only, all pages
   getRawFile(owner: string, repo: string, path: string, ref: string): Promise<string>;
   listLabels(owner: string, repo: string): Promise<{ id: number; name: string }[]>; // repo labels + the owning org's labels
-}
-```
-
-Added in Phase 4:
-
-```ts
   createIssue(owner: string, repo: string, input: CreateIssueInput): Promise<{ number: number; url: string }>;
   addDependency(owner: string, repo: string, issue: number, dependsOn: number): Promise<void>;
   listIssuesCreatedBySince(owner: string, repo: string, username: string, since: Date): Promise<{ number: number; body: string; url: string }[]>;
+}
 ```
 
-`GiteaForge` retries 429/5xx and network errors with jittered backoff (3 attempts) and throws a typed `ForgeError { status, retryable }`. There is no `listIssueTemplates`: templates are read from the tree (Section 6).
+`GiteaForge` retries 429/5xx and network errors with jittered backoff (3 attempts) and throws a typed `ForgeError { status, retryable }`, **except `createIssue`**, which makes a single attempt: retrying a POST that timed out or 5xx'd could create a duplicate issue, so an ambiguous failure there is left for the caller (`postDraft`) rather than retried underneath it. There is no `listIssueTemplates`: templates are read from the tree (Section 6).
 
 ### Endpoints
 
@@ -392,25 +385,26 @@ Added in Phase 4:
 | POST | `/api/drafts/:id/approve` | sync | built | `{version}` -> `draft -> approved`, sets `approved_by`; 409 if the draft changed since that version |
 | POST | `/api/drafts/:id/unapprove` | sync | built | `approved -> draft`, clears `approved_by` |
 | DELETE | `/api/drafts/:id` | sync | built | Only `draft`; 204 |
-| POST | `/api/drafts/:id/retry` | sync | Phase 4 | `failed -> approved` |
-| POST | `/api/drafts/:id/post` | sync | Phase 4 | Post one draft now (Section 7) |
-| POST | `/api/drafts/:id/reconcile` | sync | Phase 4 | Resolve a stuck `posting` (Section 7) |
-| POST | `/api/repos/:id/post-queue` | sync -> bg | Phase 4 | Trigger background posting of every ready draft in the repo |
+| POST | `/api/drafts/:id/retry` | sync | built | `failed -> approved` |
+| POST | `/api/drafts/:id/post` | sync | built | Post one draft now (Section 7); only throws if the claim itself is refused (409) -- every other outcome is persisted and returned in the draft |
+| POST | `/api/drafts/:id/reconcile` | sync | built | Resolve a stuck `posting`, or retry unlinked dependency links on a `posted` draft (Section 7) |
+| POST | `/api/repos/:id/post-queue` | sync -> bg | built | Trigger background posting of every ready draft in the repo |
 
-Errors use one shape: `{ error: { code, message, details? } }`. 409s from review writes carry `details: { reason: "status" | "stale", status, version }`. Shared zod schemas for every request/response live in `packages/shared`. No endpoint emits CORS headers.
+Errors use one shape: `{ error: { code, message, details? } }`. 409s from review writes (edit/approve/unapprove) carry `details: { reason: "status" | "stale", status, version }`. Posting endpoints use their own reason codes instead, since the failure modes differ: `post` can refuse with `status`, `unposted_deps`, or `claimed`; `reconcile` with `not_stale`. Shared zod schemas for every request/response live in `packages/shared`. No endpoint emits CORS headers.
 
 ### Background functions
 
 | Function | Path | Status | Triggered by |
 |---|---|---|---|
 | `draft-run-background` | `/internal/draft-run` | built | `POST /api/raw-issues`, `POST /api/runs/:id/retry` |
-| `post-queue-background` | `/internal/post-queue` | Phase 4 | `POST /api/repos/:id/post-queue` |
+| `post-queue-background` | `/internal/post-queue` | built | `POST /api/repos/:id/post-queue` |
 
 - Background mode comes from the `-background` filename suffix.
 - The sync endpoint calls `fetch` against `{request origin}/internal/...` (production, preview, or `netlify dev`). It sends `x-internal-secret: INTERNAL_JOB_SECRET`, the caller's current (already refreshed) access token as `Authorization: Bearer`, and a JSON body with the id. It awaits only the 202. The token travels server-to-server only.
 - Background functions reject any request without a matching secret (constant-time compare) and then run `withAuth` on the bearer token, so org membership is re-checked. A 401/403 there marks the run failed ("sign in again and retry"); a 5xx is thrown for a platform retry.
-- **Retries:** Netlify retries a background function that throws, after 1 minute and again after 2 more. Deterministic failures (validation errors, 4xx from Gitea or the AI provider, bad AI output after repair, a prompt too large for the model) mark the run `failed` and **return normally**. Transient failures (network, 429, 5xx) are thrown so the platform retry applies, except on the last attempt, which marks the run `failed` with "This looks temporary: retry the run in a minute." Every job is idempotent.
-- **Local dev:** `netlify dev` never replays failed background functions, so the job runs with one attempt there and fails transient errors at once instead of leaving the run in progress.
+- **Retries (`draft-run-background`):** Netlify retries a background function that throws, after 1 minute and again after 2 more. Deterministic failures (validation errors, 4xx from Gitea or the AI provider, bad AI output after repair, a prompt too large for the model) mark the run `failed` and **return normally**. Transient failures (network, 429, 5xx) are thrown so the platform retry applies, except on the last attempt, which marks the run `failed` with "This looks temporary: retry the run in a minute." Every job is idempotent.
+- **Retries (`post-queue-background`):** it never throws to trigger a platform retry. Each draft is claimed atomically before posting, so a race with a manual `POST /api/drafts/:id/post` (or a second queue run) just moves on to the next ready draft instead of erroring the whole batch; the loop itself stops on the conditions in Section 7 (none ready, 50 posts, 3 consecutive failures).
+- **Local dev:** `netlify dev` never replays failed background functions, so `draft-run-background` runs with one attempt there and fails transient errors at once instead of leaving the run in progress. `post-queue-background` is unaffected, since it does not rely on platform retries.
 - **Token lifetime:** Gitea access tokens last 1 h. The 20-minute refresh margin in `withAuth` means the forwarded token has at least 20 minutes left when the job starts, which covers the 15-minute background limit.
 
 ---
@@ -473,12 +467,14 @@ Both calls go through one `LlmClient` interface; the provider is chosen by `LLM_
 
 ---
 
-## 7. Stage 2 -- Posting (`pipeline/post.ts`, no AI) -- Phase 4
+## 7. Stage 2 -- Posting (`pipeline/post.ts`, no AI)
 
-### `postDraft(draftId, user, forge)`
+### `postDraft(draftId, actorId, forge, store)`
 
-1. **Claim** with the atomic UPDATE (Section 4). Zero rows -> 409 with the specific reason.
-2. **Build body:** `draft.body`, then a `**Depends on:** #12, #15` line using the dependencies' `gitea_number`s (if any), then the hidden marker `<!-- issue-pipeline:draft:{draft_id} -->`. *(Open: when the template has a "Dependencies / blockers" section, insert the links there instead. Decide in Phase 4.)*
+Like `runDraftJob` (Section 6), this takes the store it needs as a plain object of injected functions, so it is unit-tested against fakes rather than a live database (`pipeline/post.test.ts`).
+
+1. **Claim** with the atomic UPDATE (Section 4). Zero rows -> 409 with the specific reason (`status`, `unposted_deps`, or `claimed`).
+2. **Build body:** `draft.body`, then a `**Depends on:** #12, #15` line using the dependencies' `gitea_number`s (if any), then the hidden marker `<!-- issue-pipeline:draft:{draft_id} -->`. *(Still open: when the template has a "Dependencies / blockers" section, insert the links there instead -- see Section 13.)*
 3. **Labels:** map names -> ids from `listLabels`; drop unknown names and record them in the event detail.
 4. **Create:** `createIssue` with the user's token, so the issue is authored by that user.
 5. **Record immediately:** `UPDATE drafts SET status='posted', gitea_number, gitea_url, updated_at WHERE id = $1 AND status = 'posting'`, plus a `posted` event.
@@ -489,9 +485,9 @@ Error handling:
 - Failure **before** step 4, or a definite 4xx from step 4 -> `failed` with `last_error`.
 - Ambiguous failure **during** step 4 (timeout, connection reset, 5xx) -> leave the draft in `posting`; reconcile decides.
 
-### `reconcile(draftId)`
+### `reconcileDraft(draftId, actorId, forge, store)`
 
-Allowed when the draft is `posting` and `claimed_at` is older than 5 minutes, or when a `posted` draft has unlinked dependencies.
+Allowed when the draft is `posting` and `claimed_at` is older than 5 minutes, or when a `posted` draft has unlinked dependencies; otherwise 409 (`reason: "not_stale"`).
 
 1. `listIssuesCreatedBySince(claimed_by.username, claimed_at - 1 min)` (Gitea list-issues `created_by` + `since`) and search bodies for the draft's marker.
 2. Found -> mark `posted` with that number. Not found -> return to `approved`.
@@ -532,7 +528,7 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 | Board | `/board?repo=<id>` | Columns by status: Draft, Approved, Posting, Posted, Failed; repo filter (or all repos). Cards: title, repo, labels, "Blocked by N unposted drafts", issue number, approver |
 | Draft editor | `/drafts/<id>` | Status, repo, template, author, approver, Gitea link. While `draft`: title, body with Write / Preview tabs, label chips (repo labels live from Gitea), dependency checkboxes (same-repo drafts with their status), Save, Approve (disabled while there are unsaved changes), Delete with inline confirm. While `approved`: read-only view with Unapprove. "Needed by" list and event history. A stale save or approval shows **"Edited by someone else"** with Reload; the editor also polls every 15 s and flags a newer version if the form has unsaved edits |
 | Repositories | `/repos` | Tracked repos; search accessible repos and track one (disabled for archived repos or repos with issues turned off) |
-| Card actions | Phase 4 | Post, Retry (failed), Reconcile (stale posting), "Post all ready" on the board |
+| Card actions | built | Post and Unapprove on `approved` drafts, Retry on `failed`, Reconcile on `posting` (all in the draft editor); "Post all ready" on the board, scoped to the selected repo |
 
 **Markdown renders AI-written text, so it must not render raw HTML.** `components/Markdown.tsx` uses `react-markdown` with `skipHtml` and its default URL filter, and opens links in a new tab with `rel="noopener noreferrer"`. A test asserts script tags, event handlers, and `javascript:` links never reach the page. GitHub-flavoured extras (task-list checkboxes, tables) would need `remark-gfm`, not added; `- [ ]` checklists currently render as plain text in the preview.
 
@@ -580,21 +576,22 @@ Run everything with `pnpm -r test`. Current coverage:
 
 - **Unit (vitest, `apps/api`):**
   - Session crypto (round trip, tampering, wrong key, rotation, AAD swap, max age, size under 4 KB); CSRF; OAuth helpers, login, callback (state mismatch, stale, denied, non-member, rejected exchange), `return_to` validation; `withAuth` (bearer and cookie, refresh success/rejected/transport error, org gate, token never logged).
-  - `GiteaForge`: retries, tree paging, raw-file path encoding, org label merge, membership redirects.
+  - `GiteaForge`: retries, tree paging, raw-file path encoding, org label merge, membership redirects, single-attempt `createIssue` (never retries a 5xx), dependency links, paging issues by creator and time.
   - Template parsing against the real `feature-task.yml` (CRLF, emoji), Markdown templates, template discovery order.
   - Draft validation, dropdown snapping, sanitizing, cycle detection, tree filtering, README/ROUTING.md discovery.
   - Prompt budgeting: file-list fallbacks, routing-aware ranking, too-small context failure.
   - Stage 1 job with an in-memory store: key -> id mapping, snapshot reuse, one repair then failure, deterministic vs transient failures, platform retry producing drafts exactly once, last-attempt give-up, local dev single attempt, ROUTING.md reaching both calls.
   - AI clients: Anthropic structured vs tool mode, tool-result pairing on repair, stop reasons; Gemini schema requests, thought handling, repair replay, retries on 503/429, depleted credits not retried, error descriptions (including the LM Studio context-overflow message).
   - Review rules: dependency checks and refusal reasons.
+  - `postDraft`/`reconcileDraft` with an in-memory store and `fakeForge`: claim refusal reasons, label id mapping and dropped-label recording, an ambiguous `createIssue` failure left `posting` instead of guessed at, a definite failure marked `failed`, a link failure recorded without undoing the post, reconcile finding (or not finding) the marker on Gitea, and retrying unlinked dependency links.
 - **Unit (vitest, `apps/web`):** API wrapper error mapping; Markdown renders structure but never raw HTML or `javascript:` links.
 - **Unit (vitest, `packages/shared`):** queue response schema accepts partial draft counts.
 - **Live, opt-in:**
-  - `LIVE_DB=1` against the Neon dev branch: run claim, guarded draft commit (a duplicate commit writes nothing), queue listing, snapshots with `routing`, requeue rules, and review writes (stale edit refused, approved drafts read-only until unapproved, database-level cycle guard with the application check bypassed, delete rules).
+  - `LIVE_DB=1` against the Neon dev branch: run claim, guarded draft commit (a duplicate commit writes nothing), queue listing, snapshots with `routing`, requeue rules, review writes (stale edit refused, approved drafts read-only until unapproved, database-level cycle guard with the application check bypassed, delete rules), and posting (the atomic claim skips a draft with an unposted dependency and cannot be taken twice, mark posted/failed, retry back to approved, reconcile to posted or approved from a simulated stale `claimed_at`, dependency link marking, link-failure and reconciled-links events).
   - `LIVE_LLM=1` against the configured provider: both Stage 1 calls with the real issue form.
 - **Not yet built:**
   - **Integration:** a local Gitea in Docker (`gitea/gitea`) seeded by `scripts/seed_gitea.py` (Python, `requests`) with an admin token, a test org and users, a repo with a Markdown template and a YAML form, labels, and issue dependencies enabled. Tests authenticate with personal access tokens as `Authorization: Bearer`.
-  - **Failure injection (Phase 4):** kill the process between `createIssue` and the DB update, then run reconcile and assert no duplicate issue.
+  - **Failure injection:** kill the process between `createIssue` and the DB update against a real Gitea, then run reconcile and assert no duplicate issue. `postDraft`'s handling of an *ambiguous* `createIssue` failure is covered by a unit test with a fake that throws; this is the harder end-to-end version against real process death and a real Gitea, which needs the Docker integration environment above.
   - **Smoke (Phase 5):** `scripts/smoke_test.py` runs raw issue -> drafts -> approve -> post against a deployed environment, using a bearer PAT.
 
 ---
@@ -619,9 +616,10 @@ Each phase ends with its acceptance criteria passing and a short summary back to
 - Board, draft editor, label and dependency pickers, approve/unapprove, delete, event history, optimistic concurrency with guarded writes, `react-markdown` preview.
 - **Accept:** two browser sessions editing the same draft -> the second gets "Edited by someone else" (409); a cyclic dependency is rejected; approved drafts are read-only until unapproved; Markdown preview does not execute HTML from draft bodies (covered by a unit test).
 
-### Phase 4 -- Posting
-- `createIssue` / `addDependency` / `listIssuesCreatedBySince` on the forge, `postDraft`, dependency linking, reconcile, post queue, board and editor actions (Post, Retry, Reconcile, "Post all ready").
-- **Accept:** the posted issue appears in Gitea authored by the posting user with the hidden marker; dependencies post first and are linked; posting a blocked draft returns 409 naming the unposted dependencies; the failure-injection test yields exactly one issue after reconcile.
+### Phase 4 -- Posting -- BUILT, awaiting acceptance (uncommitted)
+- `createIssue` / `addDependency` / `listIssuesCreatedBySince` on the forge (single-attempt `createIssue`, so a timeout or 5xx cannot cause a silent double-post), `postDraft` and `reconcileDraft` (`pipeline/post.ts`, injected-store pattern like `pipeline/draft.ts`), the atomic claim and its guarded-write siblings in `db/drafts.ts`, `post-queue-background`, and editor/board actions (Post, Retry, Reconcile, "Post all ready").
+- Covered by unit tests against fakes (`pipeline/post.test.ts`) and, for the raw SQL itself, by live tests against the Neon dev branch (`db/runs.live.test.ts`, "posting").
+- **Accept (not yet run against a live Gitea):** the posted issue appears in Gitea authored by the posting user with the hidden marker; dependencies post first and are linked; posting a blocked draft returns 409 naming the unposted dependencies; the failure-injection test (Section 11, still not built -- needs the Docker Gitea integration environment) yields exactly one issue after reconcile.
 
 ### Phase 5 -- Production deployment
 - Production Netlify site and env vars, Neon production branch + migrations, production redirect URI on the Gitea OAuth app, `scripts/smoke_test.py`.
@@ -655,6 +653,9 @@ Resolved:
 12. **Repository conventions (2026-09-13):** every tracked repository carries `README.md` and `ROUTING.md` at its root. `ROUTING.md` maps areas of the system to paths (e.g. `- Password reset: app/Http/Controllers/Auth/, routes/web.php`).
 13. **Dependencies approved:** `yaml` (2026-09-12), `react-markdown` (2026-09-13). `remark-gfm` not requested.
 14. **Queue and run detail (2026-09-13):** runs expand inside the Queue tab instead of a separate page; submitting notes lands on the Queue.
+15. **Posting reason codes (2026-09-13):** `POST /api/drafts/:id/post` and `/reconcile` use their own `details.reason` values (`unposted_deps`, `claimed`, `not_stale`) rather than being forced into the edit endpoints' `status` | `stale` pair, since the ways a claim or a reconcile can be refused genuinely differ from a stale edit.
+16. **Retry logs no new event (2026-09-13):** `failed -> approved` via `POST /api/drafts/:id/retry` does not add a `draft_events` row. The existing `claimed` -> `failed` history already shows what happened; none of the ten documented event names (Section 4) fit "retried" without being reused in a way that would misread as a fresh human decision.
+17. **`post-queue-background` never throws for a platform retry (2026-09-13):** unlike `draft-run-background`, each draft it posts is claimed atomically, so a lost race just moves on to the next ready draft. Retrying the whole batch on a platform retry would only redo work the loop's own stop conditions already bound.
 
 Still to verify or decide before the phase that depends on them:
 
@@ -662,6 +663,6 @@ Still to verify or decide before the phase that depends on them:
 |---|---|---|
 | `[oauth2] INVALIDATE_REFRESH_TOKENS` is `false` on the instance | Phase 1 | Not explicitly confirmed; the default `false` is assumed. If `true`, parallel refreshes revoke the grant and refresh must be serialized |
 | `/api/*` functions take precedence over the SPA fallback redirect | Phase 5 | Confirmed under `netlify dev`; re-check in production |
-| Issue dependencies enabled on each target repo | Phase 4 | Outstanding |
-| Dependency links inside the template's "Dependencies / blockers" section vs. an appended line | Phase 4 | Open |
+| Issue dependencies enabled on each target repo | Phase 4 acceptance | Outstanding -- not verified against a real Gitea in this session |
+| Dependency links inside the template's "Dependencies / blockers" section vs. an appended line | Future | Open; Phase 4 shipped with the simple appended `**Depends on:**` line |
 | Whether to add `remark-gfm` so checklists and tables render in the preview | Phase 3 follow-up | Open |

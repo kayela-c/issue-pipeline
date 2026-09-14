@@ -92,6 +92,44 @@ describe("GiteaForge", () => {
     await expect(user.forge.listLabels("kayela", "app")).resolves.toEqual([{ id: 1, name: "bug" }]);
   });
 
+  it("creates an issue in a single attempt, never retrying a 5xx", async () => {
+    const { forge, fetch } = forgeWith([new Response("", { status: 502 })]);
+    const err = await forge.createIssue("o", "r", { title: "t", body: "b", labelIds: [1] }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 502, retryable: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    const ok = forgeWith([jsonResponse({ number: 42, html_url: "https://git.example.com/o/r/issues/42" }, 201)]);
+    await expect(ok.forge.createIssue("o", "r", { title: "t", body: "b", labelIds: [1] })).resolves.toEqual({
+      number: 42,
+      url: "https://git.example.com/o/r/issues/42",
+    });
+    const [url, init] = ok.fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://git.example.com/api/v1/repos/o/r/issues");
+    expect(JSON.parse(init.body as string)).toEqual({ title: "t", body: "b", labels: [1] });
+  });
+
+  it("posts a dependency link with retries", async () => {
+    const { forge, fetch } = forgeWith([new Response("", { status: 500 }), new Response(null, { status: 201 })]);
+    await expect(forge.addDependency("o", "r", 5, 3)).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const [url, init] = fetch.mock.calls[1] as unknown as [string, RequestInit];
+    expect(url).toBe("https://git.example.com/api/v1/repos/o/r/issues/5/dependencies");
+    expect(JSON.parse(init.body as string)).toEqual({ index: 3 });
+  });
+
+  it("pages issues created by a user since a given time", async () => {
+    const since = new Date("2026-01-01T00:00:00Z");
+    const { forge, fetch } = forgeWith([
+      jsonResponse([{ number: 1, html_url: "u1", body: "one" }]),
+    ]);
+    await expect(forge.listIssuesCreatedBySince("o", "r", "kayela", since)).resolves.toEqual([
+      { number: 1, body: "one", url: "u1" },
+    ]);
+    const url = (fetch.mock.calls[0] as unknown as [string])[0];
+    expect(url).toContain("created_by=kayela");
+    expect(url).toContain("since=2026-01-01T00%3A00%3A00.000Z");
+  });
+
   it("treats only a direct 204 as org membership", async () => {
     for (const [status, member] of [[204, true], [302, false], [404, false], [403, false]] as const) {
       const { forge, fetch } = forgeWith([new Response(null, { status })]);

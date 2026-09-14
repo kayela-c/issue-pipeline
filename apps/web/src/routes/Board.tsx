@@ -1,6 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DRAFT_STATUSES, type Draft, type DraftStatus } from "@issue-pipeline/shared";
-import { listDrafts, listRepos } from "../lib/api";
+import { listDrafts, listRepos, postQueue } from "../lib/api";
 import { linkHandler, replace, useSearchParam } from "../lib/router";
 
 export const DRAFT_STATUS_LABEL: Record<DraftStatus, string> = {
@@ -49,6 +49,7 @@ function DraftCard({ draft, showRepo }: { draft: Draft; showRepo: boolean }) {
 /** Drafts in columns by status, for one repo or all of them. */
 export function Board() {
   const repoId = useSearchParam("repo") ?? "";
+  const queryClient = useQueryClient();
   const repos = useQuery({ queryKey: ["repos"], queryFn: listRepos });
   const drafts = useQuery({
     queryKey: ["drafts", repoId],
@@ -56,6 +57,10 @@ export function Board() {
     // Every 10 s while visible, every 2 s while anything is posting.
     refetchInterval: (query) => (query.state.data?.some((d) => d.status === "posting") ? 2_000 : 10_000),
     refetchIntervalInBackground: false,
+  });
+  const postReady = useMutation({
+    mutationFn: () => postQueue(repoId),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["drafts", repoId] }),
   });
 
   const byStatus = new Map<DraftStatus, Draft[]>(DRAFT_STATUSES.map((s) => [s, []]));
@@ -79,10 +84,16 @@ export function Board() {
             ))}
           </select>
         </label>
+        {repoId && (
+          <button type="button" onClick={() => postReady.mutate()} disabled={postReady.isPending}>
+            {postReady.isPending ? "Posting…" : "Post all ready"}
+          </button>
+        )}
         {drafts.isFetching && <span className="muted small">Refreshing…</span>}
       </div>
 
       {drafts.error && <p className="status status--bad">Could not load drafts: {drafts.error.message}</p>}
+      {postReady.error && <p className="status status--bad">{postReady.error.message}</p>}
 
       <div className="board-columns">
         {DRAFT_STATUSES.map((status) => {

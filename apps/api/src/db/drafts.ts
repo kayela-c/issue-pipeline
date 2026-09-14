@@ -304,3 +304,231 @@ export async function deleteDraft(id: string): Promise<boolean> {
     .returning({ id: schema.drafts.id });
   return rows.length > 0;
 }
+
+// --- Posting (docs/ARCHITECTURE.md section 7) -----------------------------------
+
+/**
+ * approved -> posting, only when every dependency is posted and no one else
+ * has already claimed it. This is the only way a draft enters `posting`.
+ */
+export async function claimDraftForPosting(id: string, actorId: string): Promise<boolean> {
+  const client = getDb().$client;
+  const rows = await client`
+    WITH updated AS (
+      UPDATE drafts d
+      SET status = 'posting', claimed_by = ${actorId}::uuid, claimed_at = now(), updated_at = now()
+      WHERE d.id = ${id}
+        AND d.status = 'approved'
+        AND NOT EXISTS (
+          SELECT 1 FROM draft_deps dd
+          JOIN drafts p ON p.id = dd.depends_on_id
+          WHERE dd.draft_id = d.id AND p.status <> 'posted')
+      RETURNING d.id
+    ), logged AS (
+      INSERT INTO draft_events (draft_id, actor_id, event) SELECT id, ${actorId}::uuid, 'claimed' FROM updated
+    )
+    SELECT id FROM updated`;
+  return rows.length > 0;
+}
+
+/** posting -> posted, only for the draft that claimed it. */
+export async function markDraftPosted(input: {
+  id: string;
+  actorId: string;
+  giteaNumber: number;
+  giteaUrl: string;
+  droppedLabels: string[];
+}): Promise<boolean> {
+  const client = getDb().$client;
+  const detail = JSON.stringify({ gitea_number: input.giteaNumber, dropped_labels: input.droppedLabels });
+  const rows = await client`
+    WITH updated AS (
+      UPDATE drafts
+      SET status = 'posted', gitea_number = ${input.giteaNumber}, gitea_url = ${input.giteaUrl}, updated_at = now()
+      WHERE id = ${input.id} AND status = 'posting'
+      RETURNING id
+    ), logged AS (
+      INSERT INTO draft_events (draft_id, actor_id, event, detail)
+      SELECT id, ${input.actorId}::uuid, 'posted', ${detail}::jsonb FROM updated
+    )
+    SELECT id FROM updated`;
+  return rows.length > 0;
+}
+
+/** posting -> failed, with the message shown to the team. */
+export async function markDraftFailed(input: { id: string; actorId: string; error: string }): Promise<boolean> {
+  const client = getDb().$client;
+  const error = input.error.slice(0, 2000);
+  const detail = JSON.stringify({ error: input.error.slice(0, 500) });
+  const rows = await client`
+    WITH updated AS (
+      UPDATE drafts
+      SET status = 'failed', last_error = ${error}, updated_at = now()
+      WHERE id = ${input.id} AND status = 'posting'
+      RETURNING id
+    ), logged AS (
+      INSERT INTO draft_events (draft_id, actor_id, event, detail)
+      SELECT id, ${input.actorId}::uuid, 'failed', ${detail}::jsonb FROM updated
+    )
+    SELECT id FROM updated`;
+  return rows.length > 0;
+}
+
+/** failed -> approved, so the team can retry posting without re-reviewing content. */
+export async function retryFailedDraft(id: string): Promise<boolean> {
+  const rows = await getDb()
+    .update(schema.drafts)
+    .set({ status: "approved", lastError: null, updatedAt: new Date() })
+    .where(and(eq(schema.drafts.id, id), eq(schema.drafts.status, "failed")))
+    .returning({ id: schema.drafts.id });
+  return rows.length > 0;
+}
+
+export async function markDependencyLinked(draftId: string, dependsOnId: string): Promise<void> {
+  await getDb()
+    .update(schema.draftDeps)
+    .set({ linkedInGitea: true })
+    .where(and(eq(schema.draftDeps.draftId, draftId), eq(schema.draftDeps.dependsOnId, dependsOnId)));
+}
+
+/** A dependency link failed on Gitea's side; the post itself still stands. */
+export async function recordLinkFailed(input: {
+  draftId: string;
+  actorId: string;
+  dependsOnId: string;
+  error: string;
+}): Promise<void> {
+  await getDb()
+    .insert(schema.draftEvents)
+    .values({
+      draftId: input.draftId,
+      actorId: input.actorId,
+      event: "link_failed",
+      detail: { depends_on_id: input.dependsOnId, error: input.error.slice(0, 500) },
+    });
+}
+
+/** Everything reconcile needs to decide a stuck `posting`, or retry unlinked dependencies of a `posted` draft. */
+export interface ReconcileContext {
+  status: DraftStatus;
+  claimedByUsername: string | null;
+  claimedAt: string | null;
+  giteaNumber: number | null;
+  repoOwner: string;
+  repoName: string;
+  /** Dependencies that are themselves posted but not yet linked in Gitea. */
+  unlinkedDeps: Array<{ dependsOnId: string; giteaNumber: number }>;
+}
+
+export async function getReconcileContext(id: string): Promise<ReconcileContext | undefined> {
+  const db = getDb();
+  const claimedBy = alias(schema.users, "claimed_by_user");
+  const [row] = await db
+    .select({
+      status: schema.drafts.status,
+      claimedAt: schema.drafts.claimedAt,
+      claimedByUsername: claimedBy.username,
+      giteaNumber: schema.drafts.giteaNumber,
+      repoOwner: schema.repos.owner,
+      repoName: schema.repos.name,
+    })
+    .from(schema.drafts)
+    .innerJoin(schema.repos, eq(schema.drafts.repoId, schema.repos.id))
+    .leftJoin(claimedBy, eq(schema.drafts.claimedBy, claimedBy.id))
+    .where(eq(schema.drafts.id, id));
+  if (!row) return undefined;
+
+  const deps = await db
+    .select({ dependsOnId: schema.draftDeps.dependsOnId, giteaNumber: schema.drafts.giteaNumber })
+    .from(schema.draftDeps)
+    .innerJoin(schema.drafts, eq(schema.draftDeps.dependsOnId, schema.drafts.id))
+    .where(
+      and(
+        eq(schema.draftDeps.draftId, id),
+        eq(schema.draftDeps.linkedInGitea, false),
+        eq(schema.drafts.status, "posted"),
+      ),
+    );
+
+  return {
+    status: row.status as DraftStatus,
+    claimedAt: row.claimedAt?.toISOString() ?? null,
+    claimedByUsername: row.claimedByUsername,
+    giteaNumber: row.giteaNumber,
+    repoOwner: row.repoOwner,
+    repoName: row.repoName,
+    unlinkedDeps: deps.filter((d): d is { dependsOnId: string; giteaNumber: number } => d.giteaNumber !== null),
+  };
+}
+
+/** A stuck `posting` was found on Gitea after all: record it rather than double-post. */
+export async function reconcileToPosted(input: {
+  id: string;
+  actorId: string;
+  giteaNumber: number;
+  giteaUrl: string;
+}): Promise<boolean> {
+  const client = getDb().$client;
+  const detail = JSON.stringify({ outcome: "posted", gitea_number: input.giteaNumber });
+  const rows = await client`
+    WITH updated AS (
+      UPDATE drafts
+      SET status = 'posted', gitea_number = ${input.giteaNumber}, gitea_url = ${input.giteaUrl}, updated_at = now()
+      WHERE id = ${input.id} AND status = 'posting'
+      RETURNING id
+    ), logged AS (
+      INSERT INTO draft_events (draft_id, actor_id, event, detail)
+      SELECT id, ${input.actorId}::uuid, 'reconciled', ${detail}::jsonb FROM updated
+    )
+    SELECT id FROM updated`;
+  return rows.length > 0;
+}
+
+/** A stuck `posting` was never created on Gitea: hand it back for another attempt. */
+export async function reconcileToApproved(input: { id: string; actorId: string }): Promise<boolean> {
+  const client = getDb().$client;
+  const detail = JSON.stringify({ outcome: "approved" });
+  const rows = await client`
+    WITH updated AS (
+      UPDATE drafts
+      SET status = 'approved', claimed_by = NULL, claimed_at = NULL, updated_at = now()
+      WHERE id = ${input.id} AND status = 'posting'
+      RETURNING id
+    ), logged AS (
+      INSERT INTO draft_events (draft_id, actor_id, event, detail)
+      SELECT id, ${input.actorId}::uuid, 'reconciled', ${detail}::jsonb FROM updated
+    )
+    SELECT id FROM updated`;
+  return rows.length > 0;
+}
+
+export async function recordReconciledLinks(input: {
+  id: string;
+  actorId: string;
+  linked: number;
+  stillFailing: number;
+}): Promise<void> {
+  await getDb()
+    .insert(schema.draftEvents)
+    .values({
+      draftId: input.id,
+      actorId: input.actorId,
+      event: "reconciled",
+      detail: { outcome: "links", linked: input.linked, still_failing: input.stillFailing },
+    });
+}
+
+/** The oldest `approved` draft in a repo whose dependencies are all posted, if any. */
+export async function findReadyDraftId(repoId: string): Promise<string | undefined> {
+  const client = getDb().$client;
+  const rows = (await client`
+    SELECT d.id FROM drafts d
+    WHERE d.repo_id = ${repoId} AND d.status = 'approved'
+      AND NOT EXISTS (
+        SELECT 1 FROM draft_deps dd
+        JOIN drafts p ON p.id = dd.depends_on_id
+        WHERE dd.draft_id = d.id AND p.status <> 'posted')
+    ORDER BY d.created_at ASC
+    LIMIT 1`) as Array<{ id: string }>;
+  return rows[0]?.id;
+}

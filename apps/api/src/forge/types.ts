@@ -1,8 +1,6 @@
 /**
  * Forge access behind an interface, so GitHub stays possible later without a
  * rewrite (docs/ARCHITECTURE.md section 5).
- *
- * Issue creation, dependency links, and issue search arrive with Phase 4.
  */
 
 export interface ForgeUser {
@@ -37,6 +35,23 @@ export interface ForgeLabel {
   name: string;
 }
 
+export interface CreateIssueInput {
+  title: string;
+  body: string;
+  labelIds: number[];
+}
+
+export interface CreatedIssue {
+  number: number;
+  url: string;
+}
+
+export interface ForgeIssue {
+  number: number;
+  body: string;
+  url: string;
+}
+
 export interface ForgeClient {
   getCurrentUser(): Promise<ForgeUser>;
   isOrgMember(org: string, username: string): Promise<boolean>;
@@ -49,6 +64,16 @@ export interface ForgeClient {
   getRawFile(owner: string, repo: string, path: string, ref: string): Promise<string>;
   /** Repo labels plus, for org-owned repos, the org's labels. */
   listLabels(owner: string, repo: string): Promise<ForgeLabel[]>;
+  /**
+   * Create an issue, authored as the token's user. Made with a single attempt
+   * (no retry): a timeout or 5xx here is ambiguous -- the issue may already
+   * exist -- so the caller decides what to do instead of risking a duplicate.
+   */
+  createIssue(owner: string, repo: string, input: CreateIssueInput): Promise<CreatedIssue>;
+  /** Record that `issue` depends on `dependsOn` (both issue numbers). */
+  addDependency(owner: string, repo: string, issue: number, dependsOn: number): Promise<void>;
+  /** Issues created by `username` at or after `since`, for reconciling a stuck post. */
+  listIssuesCreatedBySince(owner: string, repo: string, username: string, since: Date): Promise<ForgeIssue[]>;
 }
 
 /** A failed forge call. `retryable` marks 429/5xx/network failures. */

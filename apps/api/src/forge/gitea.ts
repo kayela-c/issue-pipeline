@@ -1,7 +1,10 @@
 import { z } from "zod";
 import {
   ForgeError,
+  type CreateIssueInput,
+  type CreatedIssue,
   type ForgeClient,
+  type ForgeIssue,
   type ForgeLabel,
   type ForgeUser,
   type RepoInfo,
@@ -49,6 +52,10 @@ const treeResponseSchema = z.object({
 });
 
 const labelsSchema = z.array(z.object({ id: z.number().int(), name: z.string() }));
+
+const issueSchema = z.object({ number: z.number().int(), html_url: z.string(), body: z.string().nullish() });
+/** Gitea's default `[api] MAX_RESPONSE_ITEMS`, reused as the issue-list page cap. */
+const MAX_ISSUE_PAGES = 20;
 
 type FetchLike = typeof fetch;
 
@@ -165,6 +172,55 @@ export class GiteaForge implements ForgeClient {
     return [...byName.values()];
   }
 
+  async createIssue(owner: string, repo: string, input: CreateIssueInput): Promise<CreatedIssue> {
+    // A single attempt: retrying a POST that timed out or 5xx'd could create a
+    // duplicate issue, so ambiguous failures are left for the caller.
+    const res = await this.requestOnce(`${this.repoPath(owner, repo)}/issues`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: input.title, body: input.body, labels: input.labelIds }),
+    });
+    if (res.status !== 201) {
+      throw new ForgeError(`create issue returned ${res.status}`, res.status, res.status === 429 || res.status >= 500);
+    }
+    const parsed = issueSchema.safeParse(await res.json().catch(() => undefined));
+    if (!parsed.success) {
+      throw new ForgeError("create issue returned an unexpected body", 502, false);
+    }
+    return { number: parsed.data.number, url: parsed.data.html_url };
+  }
+
+  async addDependency(owner: string, repo: string, issue: number, dependsOn: number): Promise<void> {
+    const path = `${this.repoPath(owner, repo)}/issues/${issue}/dependencies`;
+    const res = await this.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ index: dependsOn }),
+    });
+    if (res.status !== 200 && res.status !== 201) {
+      throw new ForgeError(`add dependency returned ${res.status}`, res.status, res.status === 429 || res.status >= 500);
+    }
+  }
+
+  async listIssuesCreatedBySince(owner: string, repo: string, username: string, since: Date): Promise<ForgeIssue[]> {
+    const all: ForgeIssue[] = [];
+    for (let page = 1; page <= MAX_ISSUE_PAGES; page++) {
+      const params = new URLSearchParams({
+        state: "all",
+        type: "issues",
+        created_by: username,
+        since: since.toISOString(),
+        page: String(page),
+        limit: String(PAGE_LIMIT),
+      });
+      const path = `${this.repoPath(owner, repo)}/issues?${params}`;
+      const batch = await this.getJson(path, z.array(issueSchema), "GET issues");
+      all.push(...batch.map((i) => ({ number: i.number, body: i.body ?? "", url: i.html_url })));
+      if (batch.length < PAGE_LIMIT) break;
+    }
+    return all;
+  }
+
   private repoPath(owner: string, repo: string) {
     return `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
   }
@@ -191,6 +247,24 @@ export class GiteaForge implements ForgeClient {
     return parsed.data;
   }
 
+  /** One fetch, no retry: the caller decides how to handle a failure. */
+  private async requestOnce(path: string, init: RequestInit = {}): Promise<Response> {
+    try {
+      return await this.fetchImpl(`${this.baseUrl}${path}`, {
+        ...init,
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${this.token}`,
+          ...init.headers,
+        },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.name : "unknown";
+      throw new ForgeError(`Gitea request failed (${reason})`, 0, true);
+    }
+  }
+
   /** One API call with retries for 429, 5xx, and network failures. */
   private async request(path: string, init: RequestInit = {}): Promise<Response> {
     let lastError: ForgeError | undefined;
@@ -202,17 +276,9 @@ export class GiteaForge implements ForgeClient {
 
       let res: Response;
       try {
-        res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-          ...init,
-          headers: {
-            accept: "application/json",
-            authorization: `Bearer ${this.token}`,
-          },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        });
+        res = await this.requestOnce(path, init);
       } catch (err) {
-        const reason = err instanceof Error ? err.name : "unknown";
-        lastError = new ForgeError(`Gitea request failed (${reason})`, 0, true);
+        lastError = err as ForgeError;
         continue;
       }
 

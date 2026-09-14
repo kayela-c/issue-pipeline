@@ -14,6 +14,9 @@ export function fakeForge(overrides: Partial<ForgeClient> = {}): ForgeClient {
     getTree: missing("getTree"),
     getRawFile: missing("getRawFile"),
     listLabels: missing("listLabels"),
+    createIssue: missing("createIssue"),
+    addDependency: missing("addDependency"),
+    listIssuesCreatedBySince: missing("listIssuesCreatedBySince"),
     ...overrides,
   };
 }

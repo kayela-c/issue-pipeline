@@ -9,6 +9,9 @@ import {
   getDraft,
   getRepoLabels,
   listDrafts,
+  postDraft,
+  reconcileDraft,
+  retryDraft,
   unapproveDraft,
   updateDraft,
   updateDraftDeps,
@@ -137,6 +140,9 @@ export function DraftEditor({ draftId }: { draftId: string }) {
     onError,
   });
   const unapprove = useMutation({ mutationFn: () => unapproveDraft(draftId), onSuccess: applyServerDraft, onError });
+  const post = useMutation({ mutationFn: () => postDraft(draftId), onSuccess: applyServerDraft, onError });
+  const retry = useMutation({ mutationFn: () => retryDraft(draftId), onSuccess: applyServerDraft, onError });
+  const reconcile = useMutation({ mutationFn: () => reconcileDraft(draftId), onSuccess: applyServerDraft, onError });
   const remove = useMutation({
     mutationFn: () => deleteDraft(draftId),
     onSuccess: () => {
@@ -152,6 +158,9 @@ export function DraftEditor({ draftId }: { draftId: string }) {
     applyServerDraft(fresh);
     save.reset();
     approve.reset();
+    post.reset();
+    retry.reset();
+    reconcile.reset();
   };
 
   const labelChoices = useMemo(() => {
@@ -172,8 +181,9 @@ export function DraftEditor({ draftId }: { draftId: string }) {
   }
 
   const editable = d.status === "draft" && !!form;
-  const busy = save.isPending || approve.isPending || unapprove.isPending || remove.isPending;
-  const actionError = [save.error, approve.error, unapprove.error, remove.error].find(
+  const busy =
+    save.isPending || approve.isPending || unapprove.isPending || post.isPending || retry.isPending || reconcile.isPending || remove.isPending;
+  const actionError = [save.error, approve.error, unapprove.error, post.error, retry.error, reconcile.error, remove.error].find(
     (e): e is Error => e instanceof Error && !isStale(e),
   );
   const boardHref = `/board?repo=${d.repo_id}`;
@@ -218,6 +228,11 @@ export function DraftEditor({ draftId }: { draftId: string }) {
 
         {d.status === "approved" && (
           <p className="status small">This draft is approved and read-only. Unapprove it to make changes.</p>
+        )}
+        {d.status === "posting" && (
+          <p className="status small">
+            Posting to Gitea… if this doesn't finish within a few minutes, Reconcile checks whether it went through.
+          </p>
         )}
         {d.last_error && <p className="status status--bad small">{d.last_error}</p>}
         {actionError && <p className="status status--bad">{actionError.message}</p>}
@@ -380,8 +395,23 @@ export function DraftEditor({ draftId }: { draftId: string }) {
             </>
           )}
           {d.status === "approved" && (
-            <button type="button" onClick={() => unapprove.mutate()} disabled={busy}>
-              {unapprove.isPending ? "Unapproving…" : "Unapprove"}
+            <>
+              <button type="button" className="primary" onClick={() => post.mutate()} disabled={busy}>
+                {post.isPending ? "Posting…" : "Post to Gitea"}
+              </button>
+              <button type="button" onClick={() => unapprove.mutate()} disabled={busy}>
+                {unapprove.isPending ? "Unapproving…" : "Unapprove"}
+              </button>
+            </>
+          )}
+          {d.status === "failed" && (
+            <button type="button" onClick={() => retry.mutate()} disabled={busy}>
+              {retry.isPending ? "Retrying…" : "Retry"}
+            </button>
+          )}
+          {d.status === "posting" && (
+            <button type="button" onClick={() => reconcile.mutate()} disabled={busy}>
+              {reconcile.isPending ? "Reconciling…" : "Reconcile"}
             </button>
           )}
         </div>
