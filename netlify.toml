@@ -38,14 +38,15 @@
   port = 8888
   autoLaunch = false
 
-# Functions with a config.path take precedence over these rules. Any other
-# /api/* path is a JSON 404, never the SPA shell.
+# Any /api/* path with no function is a JSON 404, never the SPA shell.
+# Not forced: a forced rule shadows existing content, and in production that
+# includes functions with a config.path, so every /api route returned this 404.
+# (`netlify dev` let functions win even when forced; unknown /api paths there
+# may now fall through to Vite's SPA shell instead.)
 [[redirects]]
   from = "/api/*"
   to = "/api-not-found.json"
   status = 404
-  # Forced: otherwise the SPA shell (and Vite, in dev) "matches" first.
-  force = true
 
 # Client-side routes (/login, /queue, ...) all serve the SPA shell.
 [[redirects]]
