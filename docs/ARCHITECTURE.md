@@ -544,12 +544,12 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 
 1. **One Netlify site** built from `main`: build command compiles `packages/shared` and `apps/web`; `publish = apps/web/dist`; `functions = apps/api/netlify/functions`. No base directory. `netlify.toml` at the repo root already has this -- **done**.
 2. **Environments:** production uses the Neon project's `main` branch (its default/primary branch); local dev (`netlify dev`) uses the `dev` branch. Migrations are applied with `pnpm db:migrate` before a deploy that needs them. **Done (2026-09-14):** `main` had zero tables (only `dev` had ever been migrated); `pnpm db:migrate` was run against it and all 8 tables plus `drizzle.__drizzle_migrations` now exist.
-3. **Gitea OAuth app:** confidential client with redirect URIs `https://<production-site>/api/auth/callback` and `http://localhost:8888/api/auth/callback`. **Outstanding** -- needs the production site's URL first (see below), then an admin adds it in Gitea.
-4. **Secrets** (`GITEA_OAUTH_CLIENT_SECRET`, `SESSION_SECRET`, `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY`, `DATABASE_URL`, `INTERNAL_JOB_SECRET`) live only in Netlify environment variables and the local, gitignored `.env`. Use different `SESSION_SECRET` values per environment. **Outstanding** -- Netlify site creation and env vars are done from the Netlify dashboard/CLI with Kayela's own login, not by the agent.
+3. **Gitea OAuth app:** confidential client with redirect URIs `https://issue-pipeline.netlify.app/api/auth/callback` and `http://localhost:8888/api/auth/callback`. **Site created (2026-09-14); redirect URI registration still outstanding** -- an admin needs to add the production URI in Gitea now that it's known.
+4. **Secrets** (`GITEA_OAUTH_CLIENT_SECRET`, `SESSION_SECRET`, `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY`, `DATABASE_URL`, `INTERNAL_JOB_SECRET`) live only in Netlify environment variables and the local, gitignored `.env`. Use different `SESSION_SECRET` values per environment. **Netlify site created** (`issue-pipeline.netlify.app`, project id in `.env` as `NETLIFY_PROJECT_ID`, set up by Kayela); **env vars not yet confirmed set**.
 5. **AI provider:** `LLM_PROVIDER` must be `gemini` or `anthropic` in production; `lmstudio` refuses to run outside `netlify dev`.
 6. **Key rotation:** set the new key as `SESSION_SECRET` and the old one as `SESSION_SECRET_PREVIOUS`; remove the old key after `SESSION_MAX_AGE_DAYS`.
 7. **Deploy previews** build and serve the UI and `/api/health`, but sign-in is unsupported there (their URLs are not registered redirect URIs).
-8. **Smoke test:** `scripts/smoke_test.py` (Python, `requests`) runs the full path -- track a repo, submit notes, wait for drafting, approve, post -- against a deployed site using a bearer PAT (`pip install -r scripts/requirements.txt`, then see the script's docstring for usage). **Built, not yet run against a live deployment** (there is no production site to point it at yet).
+8. **Smoke test:** `scripts/smoke_test.py` (Python, `requests`) runs the full path -- track a repo, submit notes, wait for drafting, approve, post -- against a deployed site using a bearer PAT (`pip install -r scripts/requirements.txt`, then see the script's docstring for usage). **Built, not yet run** -- needs the OAuth redirect URI and env vars in place first: `python scripts/smoke_test.py --base-url https://issue-pipeline.netlify.app --token <PAT> --owner <org> --repo <repo>`.
 
 ---
 
@@ -623,8 +623,8 @@ Each phase ends with its acceptance criteria passing and a short summary back to
 - **Accept (not yet run against a live Gitea):** the posted issue appears in Gitea authored by the posting user with the hidden marker; dependencies post first and are linked; posting a blocked draft returns 409 naming the unposted dependencies; the failure-injection test (Section 11, still not built -- needs the Docker Gitea integration environment) yields exactly one issue after reconcile.
 
 ### Phase 5 -- Production deployment -- PARTIALLY DONE
-- **Done (2026-09-14):** `netlify.toml` build config; Neon `main` branch migrated (it is the project's default/primary branch and had never been migrated -- `dev` was branched off it before any schema existed); `scripts/smoke_test.py`.
-- **Outstanding, owned by Kayela** (Netlify account and Gitea admin access, not the agent's): create the production Netlify site from `main`, set its environment variables (Section 9 item 4), register the production redirect URI on the Gitea OAuth app once the site URL exists.
+- **Done (2026-09-14):** `netlify.toml` build config; Neon `main` branch migrated (it is the project's default/primary branch and had never been migrated -- `dev` was branched off it before any schema existed); `scripts/smoke_test.py`; production Netlify site created at `https://issue-pipeline.netlify.app` (project id in `.env` as `NETLIFY_PROJECT_ID`, set up by Kayela).
+- **Outstanding, owned by Kayela** (Gitea admin access, not the agent's): register `https://issue-pipeline.netlify.app/api/auth/callback` as a redirect URI on the Gitea OAuth app; confirm production environment variables are set on the Netlify site (Section 9 item 4).
 - **Accept:** sign-in works on the production URL; the smoke test passes against production.
 
 ### Phase 6 -- Hardening
@@ -666,7 +666,8 @@ Still to verify or decide before the phase that depends on them:
 |---|---|---|
 | `[oauth2] INVALIDATE_REFRESH_TOKENS` is `false` on the instance | Phase 1 | Not explicitly confirmed; the default `false` is assumed. If `true`, parallel refreshes revoke the grant and refresh must be serialized |
 | `/api/*` functions take precedence over the SPA fallback redirect | Phase 5 | Confirmed under `netlify dev`; re-check once a production site exists |
-| Production Netlify site created, env vars set, Gitea OAuth redirect URI registered | Phase 5 | Outstanding -- Kayela's own accounts, not done by the agent |
+| Gitea OAuth redirect URI registered for `https://issue-pipeline.netlify.app` | Phase 5 | Outstanding -- Kayela's own Gitea admin access |
+| Production Netlify environment variables confirmed set | Phase 5 | Outstanding -- not verified by the agent (no Netlify access) |
 | Issue dependencies enabled on each target repo | Phase 4 acceptance | Outstanding -- not verified against a real Gitea in this session |
 | Dependency links inside the template's "Dependencies / blockers" section vs. an appended line | Future | Open; Phase 4 shipped with the simple appended `**Depends on:**` line |
 | Whether to add `remark-gfm` so checklists and tables render in the preview | Phase 3 follow-up | Open |
