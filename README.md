@@ -109,7 +109,7 @@ Drafting reads two files from the root of each tracked repository:
 
 ## Deployment
 
-One Netlify site builds `prod` and serves both the SPA and the API — see
+One Netlify site builds `main` and serves both the SPA and the API — see
 [section 9 of the architecture doc](docs/ARCHITECTURE.md) for environment
 variables, the Gitea OAuth redirect URIs, and provider constraints
 (`LLM_PROVIDER` must be `gemini` or `anthropic`; `lmstudio` only runs under
