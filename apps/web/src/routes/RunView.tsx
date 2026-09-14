@@ -2,6 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isTerminalRunStatus, type RunStatus } from "@issue-pipeline/shared";
 import { useEffect } from "react";
 import { getRun, listRunDrafts, retryRun } from "../lib/api";
+import { Markdown } from "../components/Markdown";
+import { linkHandler } from "../lib/router";
+import { DRAFT_STATUS_LABEL } from "./Board";
 
 const STEPS: Array<{ status: RunStatus; label: string }> = [
   { status: "queued", label: "Queued" },
@@ -106,11 +109,17 @@ export function RunView({ runId }: { runId: string }) {
       {done && (
         <div className="run-drafts">
           <h3>Drafts {drafts.data ? `(${drafts.data.length})` : ""}</h3>
+          <p className="muted small">Open a draft to edit, set dependencies, and approve it.</p>
           {drafts.isPending && <p className="muted small">Loading…</p>}
           {drafts.error && <p className="status status--bad">{drafts.error.message}</p>}
           {drafts.data?.map((d) => (
             <article key={d.id} className="draft">
-              <h4>{d.title}</h4>
+              <h4>
+                <a href={`/drafts/${d.id}`} onClick={linkHandler(`/drafts/${d.id}`)}>
+                  {d.title}
+                </a>{" "}
+                <span className="badge">{DRAFT_STATUS_LABEL[d.status]}</span>
+              </h4>
               <p className="muted small">
                 {d.template_name ?? "no template"}
                 {d.labels.map((l) => (
@@ -122,8 +131,9 @@ export function RunView({ runId }: { runId: string }) {
               {d.depends_on.length > 0 && (
                 <p className="small">Depends on: {d.depends_on.map((dep) => dep.title).join(", ")}</p>
               )}
-              {/* Plain text for now: AI-written Markdown is never rendered as HTML. */}
-              <pre className="body">{d.body}</pre>
+              <div className="preview preview--compact">
+                <Markdown>{d.body}</Markdown>
+              </div>
             </article>
           ))}
         </div>

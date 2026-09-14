@@ -1,22 +1,26 @@
 import {
   apiErrorSchema,
   createRawIssueResponseSchema,
+  draftDetailSchema,
   draftListResponseSchema,
   giteaRepoListResponseSchema,
   healthResponseSchema,
   meResponseSchema,
+  repoLabelsResponseSchema,
   repoListResponseSchema,
   repoSchema,
   runListResponseSchema,
   runResponseSchema,
   type ApiErrorCode,
   type Draft,
+  type DraftDetail,
   type GiteaRepo,
   type HealthResponse,
   type MeResponse,
   type Repo,
   type RunResponse,
   type RunSummary,
+  type UpdateDraftRequest,
 } from "@issue-pipeline/shared";
 import { z } from "zod";
 
@@ -137,4 +141,42 @@ export async function logout(): Promise<void> {
 /** Sign-in is a full-page navigation: the OAuth flow is a chain of redirects. */
 export function startLogin(returnTo: string): void {
   window.location.assign(`/api/auth/login?return_to=${encodeURIComponent(returnTo)}`);
+}
+
+// --- Review ---------------------------------------------------------------------
+
+export async function listDrafts(filter: { repoId?: string } = {}): Promise<Draft[]> {
+  const query = filter.repoId ? `?repo_id=${encodeURIComponent(filter.repoId)}` : "";
+  return (await request("GET", `/api/drafts${query}`, draftListResponseSchema)).drafts;
+}
+
+export function getDraft(id: string): Promise<DraftDetail> {
+  return request("GET", `/api/drafts/${encodeURIComponent(id)}`, draftDetailSchema);
+}
+
+export function updateDraft(id: string, patch: UpdateDraftRequest): Promise<DraftDetail> {
+  return request("PATCH", `/api/drafts/${encodeURIComponent(id)}`, draftDetailSchema, patch);
+}
+
+export function updateDraftDeps(id: string, dependsOnIds: string[], version: number): Promise<DraftDetail> {
+  return request("PUT", `/api/drafts/${encodeURIComponent(id)}/deps`, draftDetailSchema, {
+    depends_on_ids: dependsOnIds,
+    version,
+  });
+}
+
+export function approveDraft(id: string, version: number): Promise<DraftDetail> {
+  return request("POST", `/api/drafts/${encodeURIComponent(id)}/approve`, draftDetailSchema, { version });
+}
+
+export function unapproveDraft(id: string): Promise<DraftDetail> {
+  return request("POST", `/api/drafts/${encodeURIComponent(id)}/unapprove`, draftDetailSchema, {});
+}
+
+export async function deleteDraft(id: string): Promise<void> {
+  await request("DELETE", `/api/drafts/${encodeURIComponent(id)}`, z.null());
+}
+
+export async function getRepoLabels(repoId: string): Promise<Array<{ id: number; name: string }>> {
+  return (await request("GET", `/api/repos/${encodeURIComponent(repoId)}/labels`, repoLabelsResponseSchema)).labels;
 }

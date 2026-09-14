@@ -33,6 +33,12 @@ export function usePathname(): string {
   return useSyncExternalStore(subscribe, () => window.location.pathname);
 }
 
+/** One query-string parameter of the current URL, kept in sync with navigation. */
+export function useSearchParam(name: string): string | null {
+  const search = useSyncExternalStore(subscribe, () => window.location.search);
+  return new URLSearchParams(search).get(name);
+}
+
 /** Left-click handler for in-app links that keeps modifier-clicks working. */
 export function linkHandler(path: string) {
   return (event: React.MouseEvent<HTMLAnchorElement>) => {

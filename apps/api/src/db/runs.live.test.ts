@@ -90,7 +90,7 @@ describe.skipIf(!live)("runs store (live database)", async () => {
     const listed = await listDrafts({ runId: ids.run });
     expect(listed.map((d) => d.title).sort()).toEqual(["first A", "first B"]);
     const b = listed.find((d) => d.title === "first B")!;
-    expect(b.depends_on).toEqual([{ id: first[0]!.id, title: "first A", gitea_number: null }]);
+    expect(b.depends_on).toEqual([{ id: first[0]!.id, title: "first A", status: "draft", gitea_number: null }]);
     expect(listed.find((d) => d.title === "first A")!.labels).toEqual(["backend", "api"]);
 
     const events = await getDb().select().from(schema.draftEvents).where(inArray(schema.draftEvents.draftId, first.map((d) => d.id)));
@@ -120,5 +120,71 @@ describe.skipIf(!live)("runs store (live database)", async () => {
 
   it("only requeues failed runs", async () => {
     expect(await runs.requeueRun(ids.run)).toBe(false);
+  });
+
+  describe("review writes", () => {
+    const drafts = () => import("./drafts");
+    const detail = async (id: string) => (await (await drafts()).getDraftDetail(id))!;
+
+    it("lets the first of two edits from the same version win and refuses the second", async () => {
+      const d = await drafts();
+      const target = (await d.listDrafts({ runId: ids.run })).find((x) => x.title === "first A")!;
+      const start = target.version;
+
+      expect(await d.updateDraftContent({ id: target.id, actorId: ids.user, version: start, title: "Edited A", labels: ["x"] })).toBe(true);
+      expect(await d.updateDraftContent({ id: target.id, actorId: ids.user, version: start, title: "Stale edit" })).toBe(false);
+
+      const after = await detail(target.id);
+      expect(after).toMatchObject({ title: "Edited A", labels: ["x"], version: start + 1 });
+      expect(after.events[0]).toMatchObject({ event: "edited", detail: { fields: ["title", "labels"] } });
+    });
+
+    it("makes approved drafts read-only until unapproved", async () => {
+      const d = await drafts();
+      const target = (await d.listDrafts({ runId: ids.run })).find((x) => x.title === "Edited A")!;
+      const v = target.version;
+
+      expect(await d.approveDraft({ id: target.id, actorId: ids.user, version: v - 1 })).toBe(false);
+      expect(await d.approveDraft({ id: target.id, actorId: ids.user, version: v })).toBe(true);
+      expect(await d.updateDraftContent({ id: target.id, actorId: ids.user, version: v + 1, body: "nope" })).toBe(false);
+      expect(await d.deleteDraft(target.id)).toBe(false);
+      expect((await detail(target.id)).approved_by).toMatch(/^live-test-/);
+
+      expect(await d.unapproveDraft({ id: target.id, actorId: ids.user })).toBe(true);
+      expect(await d.unapproveDraft({ id: target.id, actorId: ids.user })).toBe(false);
+      const after = await detail(target.id);
+      expect(after).toMatchObject({ status: "draft", approved_by: null, version: v + 2 });
+      expect(after.events.slice(0, 2).map((e) => e.event)).toEqual(["unapproved", "approved"]);
+    });
+
+    it("replaces dependencies and blocks a cycle in the database even without the app check", async () => {
+      const d = await drafts();
+      const all = await d.listDrafts({ runId: ids.run });
+      const a = all.find((x) => x.title === "Edited A")!;
+      const b = all.find((x) => x.title === "first B")!;
+
+      // Fixture: B depends on A. Clear that, then point A at B.
+      expect(await d.replaceDependencies({ id: b.id, actorId: ids.user, version: b.version, dependsOnIds: [] })).toBe(true);
+      expect((await detail(b.id)).depends_on).toEqual([]);
+      const aNow = await detail(a.id);
+      expect(await d.replaceDependencies({ id: a.id, actorId: ids.user, version: aNow.version, dependsOnIds: [b.id] })).toBe(true);
+
+      // B -> A would now close a loop, so the database guard must refuse it.
+      const bNow = await detail(b.id);
+      await expect(
+        d.replaceDependencies({ id: b.id, actorId: ids.user, version: bNow.version, dependsOnIds: [a.id] }),
+      ).rejects.toBeInstanceOf(d.DependencyCycleError);
+      const bAfter = await detail(b.id);
+      expect(bAfter.depends_on).toEqual([]);
+      expect(bAfter.version).toBe(bNow.version);
+      expect(bAfter.dependents.map((x) => x.id)).toEqual([a.id]);
+    });
+
+    it("deletes only drafts in draft status", async () => {
+      const d = await drafts();
+      const target = (await d.listDrafts({ runId: ids.run })).find((x) => x.title === "first B")!;
+      expect(await d.deleteDraft(target.id)).toBe(true);
+      expect(await d.getDraftDetail(target.id)).toBeUndefined();
+    });
   });
 });

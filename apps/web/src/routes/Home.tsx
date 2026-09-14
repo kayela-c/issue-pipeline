@@ -2,6 +2,8 @@ import type { MeResponse } from "@issue-pipeline/shared";
 import { useLogout } from "../lib/auth";
 import { useEffect } from "react";
 import { linkHandler, replace, usePathname } from "../lib/router";
+import { Board } from "./Board";
+import { DraftEditor } from "./DraftEditor";
 import { NewIssue } from "./NewIssue";
 import { Queue } from "./Queue";
 import { Repos } from "./Repos";
@@ -9,6 +11,7 @@ import { Repos } from "./Repos";
 const NAV = [
   { path: "/", label: "New issue" },
   { path: "/queue", label: "Queue" },
+  { path: "/board", label: "Board" },
   { path: "/repos", label: "Repositories" },
 ];
 
@@ -18,7 +21,8 @@ export function Home({ me }: { me: MeResponse }) {
   // /queue and /queue/<run id>; older /runs/<run id> links land here too.
   const queueMatch = pathname.match(/^\/(queue|runs)(?:\/([0-9a-f-]{36}))?$/i);
   const selectedRunId = queueMatch?.[2];
-  const section = queueMatch ? "/queue" : pathname;
+  const draftId = pathname.match(/^\/drafts\/([0-9a-f-]{36})$/i)?.[1];
+  const section = queueMatch ? "/queue" : draftId ? "/board" : pathname;
 
   useEffect(() => {
     if (pathname.startsWith("/runs")) replace(selectedRunId ? `/queue/${selectedRunId}` : "/queue");
@@ -47,6 +51,10 @@ export function Home({ me }: { me: MeResponse }) {
 
       {queueMatch ? (
         <Queue selectedId={selectedRunId} />
+      ) : draftId ? (
+        <DraftEditor key={draftId} draftId={draftId} />
+      ) : pathname === "/board" ? (
+        <Board />
       ) : pathname === "/repos" ? (
         <Repos />
       ) : (
