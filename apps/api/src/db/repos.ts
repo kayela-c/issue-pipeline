@@ -1,5 +1,5 @@
 import { and, asc, eq } from "drizzle-orm";
-import type { Repo as RepoDto } from "@issue-pipeline/shared";
+import type { Repo as RepoDto, RepoForge } from "@issue-pipeline/shared";
 import type { ForgeLabel, TreeEntry } from "../forge/types";
 import type { IssueTemplate } from "../pipeline/templates";
 import { getDb, schema } from "./client";
@@ -7,6 +7,7 @@ import type { Repo, RepoSnapshot } from "./schema";
 
 export const toRepoDto = (r: Repo): RepoDto => ({
   id: r.id,
+  forge: r.forge as RepoForge,
   owner: r.owner,
   name: r.name,
   default_branch: r.defaultBranch,
@@ -14,7 +15,10 @@ export const toRepoDto = (r: Repo): RepoDto => ({
 });
 
 export function listRepos(): Promise<Repo[]> {
-  return getDb().select().from(schema.repos).orderBy(asc(schema.repos.owner), asc(schema.repos.name));
+  return getDb()
+    .select()
+    .from(schema.repos)
+    .orderBy(asc(schema.repos.forge), asc(schema.repos.owner), asc(schema.repos.name));
 }
 
 export async function getRepoById(id: string): Promise<Repo | undefined> {
@@ -24,23 +28,27 @@ export async function getRepoById(id: string): Promise<Repo | undefined> {
 
 /** Track a repo; tracking one that is already tracked returns the existing row. */
 export async function trackRepo(input: {
+  forge?: RepoForge;
   owner: string;
   name: string;
   defaultBranch: string;
   addedBy: string;
 }): Promise<{ repo: Repo; created: boolean }> {
   const db = getDb();
+  const values = { ...input, forge: input.forge ?? "gitea" };
   const [inserted] = await db
     .insert(schema.repos)
-    .values(input)
-    .onConflictDoNothing({ target: [schema.repos.owner, schema.repos.name] })
+    .values(values)
+    .onConflictDoNothing({ target: [schema.repos.forge, schema.repos.owner, schema.repos.name] })
     .returning();
   if (inserted) return { repo: inserted, created: true };
 
   const [existing] = await db
     .select()
     .from(schema.repos)
-    .where(and(eq(schema.repos.owner, input.owner), eq(schema.repos.name, input.name)));
+    .where(
+      and(eq(schema.repos.forge, values.forge), eq(schema.repos.owner, values.owner), eq(schema.repos.name, values.name)),
+    );
   if (!existing) throw new Error("repo vanished between insert and select");
   return { repo: existing, created: false };
 }

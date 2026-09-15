@@ -14,6 +14,7 @@ const RUN_ID = "00000000-0000-4000-8000-0000000000aa";
 
 const repo: Repo = {
   id: "00000000-0000-4000-8000-0000000000bb",
+  forge: "gitea",
   owner: "TrueRoster",
   name: "app",
   defaultBranch: "main",

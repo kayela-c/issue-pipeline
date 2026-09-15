@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  GITHUB_TEMPLATE_DIRS,
   NO_RESPONSE,
   appTemplateFile,
   appTemplateFromSnapshot,
@@ -29,6 +30,16 @@ describe("findTemplatePaths", () => {
 
   it("returns nothing when there are no templates", () => {
     expect(findTemplatePaths([entry("README.md")])).toEqual([]);
+  });
+
+  it("reads only .github/ISSUE_TEMPLATE for a GitHub repo, as GitHub does", () => {
+    const tree = [
+      entry(".gitea/ISSUE_TEMPLATE/feature.yml"),
+      entry("ISSUE_TEMPLATE/root.md"),
+      entry(".github/ISSUE_TEMPLATE/bug.yml"),
+      entry(".github/ISSUE_TEMPLATE/config.yml"),
+    ];
+    expect(findTemplatePaths(tree, GITHUB_TEMPLATE_DIRS)).toEqual([".github/ISSUE_TEMPLATE/bug.yml"]);
   });
 });
 

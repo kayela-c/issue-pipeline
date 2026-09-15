@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { DRAFT_TITLE_MAX, type DraftDetail, type DraftEventItem } from "@issue-pipeline/shared";
+import { DRAFT_TITLE_MAX, FORGE_LABELS, type DraftDetail, type DraftEventItem } from "@issue-pipeline/shared";
 import { useEffect, useMemo, useState } from "react";
 import { Markdown } from "../components/Markdown";
 import {
@@ -221,7 +221,7 @@ export function DraftEditor({ draftId }: { draftId: string }) {
           </span>
           {d.gitea_url && (
             <a className="small" href={d.gitea_url} target="_blank" rel="noopener noreferrer">
-              Open #{d.gitea_number} in Gitea
+              Open #{d.gitea_number} in {FORGE_LABELS[d.repo.forge]}
             </a>
           )}
         </div>
@@ -231,7 +231,7 @@ export function DraftEditor({ draftId }: { draftId: string }) {
         )}
         {d.status === "posting" && (
           <p className="status small">
-            Posting to Gitea… if this doesn't finish within a few minutes, Reconcile checks whether it went through.
+            Posting to {FORGE_LABELS[d.repo.forge]}… if this doesn't finish within a few minutes, Reconcile checks whether it went through.
           </p>
         )}
         {d.last_error && <p className="status status--bad small">{d.last_error}</p>}
@@ -397,7 +397,7 @@ export function DraftEditor({ draftId }: { draftId: string }) {
           {d.status === "approved" && (
             <>
               <button type="button" className="primary" onClick={() => post.mutate()} disabled={busy}>
-                {post.isPending ? "Posting…" : "Post to Gitea"}
+                {post.isPending ? "Posting…" : `Post to ${FORGE_LABELS[d.repo.forge]}`}
               </button>
               <button type="button" onClick={() => unapprove.mutate()} disabled={busy}>
                 {unapprove.isPending ? "Unapproving…" : "Unapprove"}

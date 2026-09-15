@@ -8,6 +8,7 @@ import { oauthConfigFromEnv, refreshTokens, type OAuthConfig, type TokenResult }
 import {
   SESSION_COOKIE,
   clearCookieHeader,
+  hasGitea,
   keyringFromEnv,
   nowSeconds,
   readCookie,
@@ -16,6 +17,7 @@ import {
   sessionSchema,
   unseal,
   withCookies,
+  type GiteaSession,
   type Keyring,
   type Session,
 } from "./session";
@@ -129,6 +131,13 @@ export function createWithAuth(deps: AuthDeps) {
             return signedOut("Your session has expired. Sign in again.");
           }
 
+          // An account created by a non-Gitea sign-in (decision 22) with no
+          // Gitea link yet: every endpoint behind withAuth needs Gitea (every
+          // tracked repo lives there), so refuse before touching Gitea at all.
+          if (!hasGitea(session)) {
+            return apiError("forbidden", "Connect your Gitea account to use this.", { reason: "gitea_required" });
+          }
+
           if (session.access_expires_at - now <= REFRESH_MARGIN_SECONDS) {
             const result = await deps.refresh(deps.oauth(), session.refresh_token);
             if (!result.ok && result.kind === "rejected") {
@@ -138,7 +147,7 @@ export function createWithAuth(deps: AuthDeps) {
               console.error("token refresh failed", { path, message: result.message });
               return apiError("upstream_error", "Gitea is unavailable. Try again shortly.");
             }
-            session = {
+            const refreshed: GiteaSession = {
               ...session,
               access_token: result.token.access_token,
               // Gitea rotates refresh tokens; keep the old one only if the
@@ -146,9 +155,12 @@ export function createWithAuth(deps: AuthDeps) {
               refresh_token: result.token.refresh_token || session.refresh_token,
               access_expires_at: now + result.token.expires_in,
             };
-            cookies.push(sessionCookieHeader(session, keys, maxAge, now));
+            session = refreshed;
+            cookies.push(sessionCookieHeader(refreshed, keys, maxAge, now));
+            token = refreshed.access_token;
+          } else {
+            token = session.access_token;
           }
-          token = session.access_token;
         }
       } catch (err) {
         return internalError(err, path);

@@ -153,6 +153,24 @@ describe("withAuth: session cookies", () => {
     expect(ok).not.toHaveBeenCalled();
   });
 
+  it("refuses a Gitea-less account (decision 22) without touching Gitea or the handler", async () => {
+    const { deps } = makeDeps();
+    const giteaLess: Session = {
+      uid: user.id,
+      username: "kayela-c",
+      gitea_id: null,
+      access_token: null,
+      refresh_token: null,
+      access_expires_at: null,
+      session_started_at: NOW - 60,
+    };
+    const res = await createWithAuth(deps)(ok)(request({ headers: { cookie: cookieFor(giteaLess) } }), context);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: { code: "forbidden", details: { reason: "gitea_required" } } });
+    expect(ok).not.toHaveBeenCalled();
+    expect(deps.refresh).not.toHaveBeenCalled();
+  });
+
   it("refreshes a token near expiry and re-issues the cookie", async () => {
     const { deps, tokensSeen } = makeDeps({
       refresh: async () => ({ ok: true, token: { access_token: "fresh-access", refresh_token: "refresh-2", expires_in: 3600 } }),

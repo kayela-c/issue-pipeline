@@ -4,6 +4,7 @@ import { withAuth } from "../../src/auth/withAuth";
 import { getRepoById } from "../../src/db/repos";
 import { countRunsSince, createRawIssueWithRun, failRun } from "../../src/db/runs";
 import { getTemplate, toTemplateSnapshot } from "../../src/db/templates";
+import { forgeForRepo } from "../../src/forge/forRepo";
 import { repoForge } from "../../src/settings/templates";
 import { HttpError, json, readJson } from "../../src/http";
 import { triggerJob } from "../../src/jobs";
@@ -16,13 +17,16 @@ function dailyRunLimit(): number {
 }
 
 /** Submit raw issue notes for a tracked repo and start drafting. */
-export default withAuth(async (req, { user, giteaToken }) => {
+export default withAuth(async (req, auth) => {
+  const { user, giteaToken } = auth;
   const { repo_id, body, template_id } = await readJson(req, createRawIssueRequestSchema);
 
   const repo = await getRepoById(repo_id);
   if (!repo) {
     throw new HttpError("not_found", "That repository is not tracked.");
   }
+  // A GitHub repo needs the caller's GitHub connection: refuse now (409 not_connected) instead of failing the run later.
+  await forgeForRepo(auth, repo);
 
   // Copy the chosen app template now, so later edits never change this run or its retries.
   let template;

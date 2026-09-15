@@ -2,8 +2,9 @@ import type { Config, Context } from "@netlify/functions";
 import { z } from "zod";
 import { withAuth } from "../../src/auth/withAuth";
 import { getSnapshot, saveSnapshot, updateDefaultBranch } from "../../src/db/repos";
-import { claimRun, commitDrafts, failRun, setRunProgress } from "../../src/db/runs";
-import { apiError, json } from "../../src/http";
+import { claimRun, commitDrafts, failRun, getRunDetails, setRunProgress } from "../../src/db/runs";
+import { repoAndForge } from "../../src/forge/forRepo";
+import { HttpError, apiError, json } from "../../src/http";
 import { hasValidJobSecret } from "../../src/jobs";
 import { AiSettingsError, createLlmClient, recordedModels } from "../../src/llm";
 import { llmConfigForUser } from "../../src/settings/ai";
@@ -38,7 +39,23 @@ export default async (req: Request, context: Context) => {
   const runId = parsed.data.run_id;
 
   let retryable: unknown;
-  const handler = withAuth(async (_req, { forge, user }) => {
+  const handler = withAuth(async (_req, auth) => {
+    const { user } = auth;
+
+    // The run's repo decides which forge to read: Gitea uses the forwarded
+    // session token, GitHub the triggering user's stored token (Phase 9).
+    const details = await getRunDetails(runId);
+    if (!details) return apiError("not_found", "Run not found.");
+    let forge;
+    try {
+      forge = (await repoAndForge(auth, details.repoId)).forge;
+    } catch (err) {
+      if (!(err instanceof HttpError) || err.code === "internal_error") throw err;
+      await failRun(runId, err.message);
+      log("repository forge unusable", { runId, reason: err.message });
+      return json({ outcome: "failed" });
+    }
+
     // The AI provider, key, and models of the user who triggered this run
     // (their Settings, else the team default).
     let llm, llmConfig;

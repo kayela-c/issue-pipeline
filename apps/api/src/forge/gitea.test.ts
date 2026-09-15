@@ -94,12 +94,12 @@ describe("GiteaForge", () => {
 
   it("creates an issue in a single attempt, never retrying a 5xx", async () => {
     const { forge, fetch } = forgeWith([new Response("", { status: 502 })]);
-    const err = await forge.createIssue("o", "r", { title: "t", body: "b", labelIds: [1] }).catch((e: unknown) => e);
+    const err = await forge.createIssue("o", "r", { title: "t", body: "b", labels: [{ id: 1, name: "bug" }] }).catch((e: unknown) => e);
     expect(err).toMatchObject({ status: 502, retryable: true });
     expect(fetch).toHaveBeenCalledTimes(1);
 
     const ok = forgeWith([jsonResponse({ number: 42, html_url: "https://git.example.com/o/r/issues/42" }, 201)]);
-    await expect(ok.forge.createIssue("o", "r", { title: "t", body: "b", labelIds: [1] })).resolves.toEqual({
+    await expect(ok.forge.createIssue("o", "r", { title: "t", body: "b", labels: [{ id: 1, name: "bug" }] })).resolves.toEqual({
       number: 42,
       url: "https://git.example.com/o/r/issues/42",
     });

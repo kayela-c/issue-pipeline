@@ -3,6 +3,7 @@ import {
   aiSettingsResponseSchema,
   aiTestResponseSchema,
   apiErrorSchema,
+  connectionsResponseSchema,
   createRawIssueResponseSchema,
   draftDetailSchema,
   draftListResponseSchema,
@@ -22,6 +23,8 @@ import {
   type AiSettingsResponse,
   type AiTestResponse,
   type ApiErrorCode,
+  type ConnectableForge,
+  type Connection,
   type CreateTemplateRequest,
   type Draft,
   type IssueTemplateDto,
@@ -33,6 +36,7 @@ import {
   type HealthResponse,
   type MeResponse,
   type Repo,
+  type RepoForge,
   type RunResponse,
   type RunSummary,
   type UpdateAiProviderRequest,
@@ -118,14 +122,21 @@ export async function listRepos(): Promise<Repo[]> {
   return (await request("GET", "/api/repos", repoListResponseSchema)).repos;
 }
 
-export async function searchGiteaRepos(query: string): Promise<GiteaRepo[]> {
+/** Repos the caller can see on a forge, for the "track a repo" picker. GitHub answers 409 not_connected without a connection. */
+export async function searchForgeRepos(forge: RepoForge, query: string): Promise<GiteaRepo[]> {
   const q = encodeURIComponent(query);
-  return (await request("GET", `/api/gitea/repos?q=${q}`, giteaRepoListResponseSchema)).repos;
+  return (await request("GET", `/api/${forge}/repos?q=${q}`, giteaRepoListResponseSchema)).repos;
 }
 
-export function trackRepo(owner: string, name: string): Promise<Repo> {
-  return request("POST", "/api/repos", repoSchema, { owner, name });
+export function trackRepo(forge: RepoForge, owner: string, name: string): Promise<Repo> {
+  return request("POST", "/api/repos", repoSchema, { forge, owner, name });
 }
+
+/** A 409 telling the caller to connect a forge in Settings before using its repos. */
+export const isNotConnected = (error: unknown): boolean =>
+  error instanceof ApiError &&
+  error.code === "conflict" &&
+  (error.details as { reason?: unknown } | undefined)?.reason === "not_connected";
 
 export async function createRawIssue(repoId: string, body: string, templateId: string | null = null): Promise<string> {
   return (
@@ -159,6 +170,14 @@ export async function logout(): Promise<void> {
 /** Sign-in is a full-page navigation: the OAuth flow is a chain of redirects. */
 export function startLogin(returnTo: string): void {
   window.location.assign(`/api/auth/login?return_to=${encodeURIComponent(returnTo)}`);
+}
+
+/**
+ * Start GitHub OAuth: signed out, this signs in through a previously linked
+ * account; signed in (from Settings), it links GitHub to the current account.
+ */
+export function startGithubLogin(returnTo: string): void {
+  window.location.assign(`/api/auth/github/login?return_to=${encodeURIComponent(returnTo)}`);
 }
 
 // --- Review ---------------------------------------------------------------------
@@ -257,4 +276,12 @@ export async function deleteTemplate(id: string): Promise<void> {
 
 export function previewTemplate(input: TemplatePreviewRequest): Promise<TemplatePreviewResponse> {
   return request("POST", "/api/template-preview", templatePreviewResponseSchema, input);
+}
+
+export async function listConnections(): Promise<Connection[]> {
+  return (await request("GET", "/api/settings/connections", connectionsResponseSchema)).connections;
+}
+
+export async function disconnectForge(forge: ConnectableForge): Promise<void> {
+  await request("DELETE", `/api/settings/connections/${forge}`, z.null());
 }

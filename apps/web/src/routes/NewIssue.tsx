@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { RAW_ISSUE_MAX_LENGTH } from "@issue-pipeline/shared";
+import { FORGE_LABELS, RAW_ISSUE_MAX_LENGTH } from "@issue-pipeline/shared";
 import { useState } from "react";
 import { createRawIssue, listRepos, listTemplates } from "../lib/api";
 import { linkHandler, navigate } from "../lib/router";
@@ -12,8 +12,9 @@ export function NewIssue() {
   const [body, setBody] = useState("");
 
   const selectedRepo = repoId || repos.data?.[0]?.id || "";
-  // Every tracked repository is on Gitea until other forges can be connected.
-  const offered = (templates.data ?? []).filter((t) => t.forges.includes("gitea"));
+  // Only app templates offered for the selected repository's forge.
+  const repoForge = repos.data?.find((r) => r.id === selectedRepo)?.forge ?? "gitea";
+  const offered = (templates.data ?? []).filter((t) => t.forges.includes(repoForge));
   const selectedTemplate = offered.some((t) => t.id === templateId) ? templateId : "";
 
   const submit = useMutation({
@@ -51,7 +52,7 @@ export function NewIssue() {
           <select value={selectedRepo} onChange={(e) => setRepoId(e.target.value)} disabled={repos.isPending}>
             {repos.data?.map((r) => (
               <option key={r.id} value={r.id}>
-                {r.owner}/{r.name}
+                {r.owner}/{r.name} ({FORGE_LABELS[r.forge]})
               </option>
             ))}
           </select>

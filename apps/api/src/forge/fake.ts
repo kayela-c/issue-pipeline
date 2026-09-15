@@ -1,3 +1,4 @@
+import { TEMPLATE_DIRS } from "../pipeline/templates";
 import type { ForgeClient } from "./types";
 
 /** A ForgeClient for tests: every method throws unless overridden. */
@@ -6,6 +7,8 @@ export function fakeForge(overrides: Partial<ForgeClient> = {}): ForgeClient {
     throw new Error(`fakeForge.${name} was called but not stubbed`);
   };
   return {
+    label: "Gitea",
+    templateDirs: TEMPLATE_DIRS,
     getCurrentUser: missing("getCurrentUser"),
     isOrgMember: missing("isOrgMember"),
     listAccessibleRepos: missing("listAccessibleRepos"),

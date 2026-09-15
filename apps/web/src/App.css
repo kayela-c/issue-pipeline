@@ -66,6 +66,17 @@ h2 {
   gap: 8px;
 }
 
+.login-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.login-providers button {
+  text-align: left;
+}
+
 .card {
   margin-top: 28px;
   padding: 20px;
@@ -754,6 +765,11 @@ button.danger-link {
 .choice input {
   width: auto;
   margin: 0;
+}
+
+.choice--row {
+  justify-content: space-between;
+  cursor: default;
 }
 
 .choice-list--inline {

@@ -1,4 +1,9 @@
+import { credentialKeysFromEnv } from "../crypto/credentials";
+import { findIdentityByForgeUser, setIdentityAccessToken, upsertIdentity, touchIdentityToken } from "../db/identities";
+import { createUnlinkedUser, getUserById, linkGiteaToUser } from "../db/users";
 import { apiError } from "../http";
+import { exchangeGithubCode, fetchGithubUser, githubAllowedUsersFromEnv, githubOAuthConfigFromEnv } from "./github";
+import type { GithubLoginDeps } from "./githubHandlers";
 import type { LoginDeps } from "./handlers";
 import { exchangeCode } from "./oauth";
 import { defaultAuthDeps } from "./withAuth";
@@ -6,6 +11,25 @@ import { defaultAuthDeps } from "./withAuth";
 export const loginDeps: LoginDeps = {
   ...defaultAuthDeps,
   exchange: (cfg, params) => exchangeCode(cfg, params),
+  linkGitea: (userId, forgeUser) => linkGiteaToUser(userId, forgeUser),
+};
+
+export const githubLoginDeps: GithubLoginDeps = {
+  ...loginDeps,
+  githubConfig: githubOAuthConfigFromEnv,
+  allowedGithubUsers: githubAllowedUsersFromEnv,
+  exchangeGithub: (cfg, params) => exchangeGithubCode(cfg, params),
+  fetchGithubUser: (token) => fetchGithubUser(token),
+  credentialKeys: credentialKeysFromEnv,
+  findGithubIdentity: async (forgeUserId) => {
+    const row = await findIdentityByForgeUser("github", forgeUserId);
+    return row && { userId: row.userId, giteaRefreshTokenEnc: row.giteaRefreshTokenEnc };
+  },
+  linkGithubIdentity: (input) => upsertIdentity({ ...input, forge: "github" }),
+  touchGithubIdentityToken: (userId, giteaRefreshTokenEnc) => touchIdentityToken(userId, "github", giteaRefreshTokenEnc),
+  saveGithubAccessToken: (userId, accessTokenEnc) => setIdentityAccessToken(userId, "github", accessTokenEnc),
+  createAccount: (input) => createUnlinkedUser(input),
+  getAccountUser: (userId) => getUserById(userId),
 };
 
 /**

@@ -53,9 +53,12 @@ export interface IssueTemplate {
   fields: FormField[];
 }
 
-/** Template files in the tree, preferring the first matching directory like Gitea. */
-export function findTemplatePaths(entries: TreeEntry[]): string[] {
-  for (const dir of TEMPLATE_DIRS) {
+/** The only directory GitHub reads issue templates and forms from. */
+export const GITHUB_TEMPLATE_DIRS = [".github/ISSUE_TEMPLATE", ".github/issue_template"];
+
+/** Template files in the tree, preferring the first matching directory like the forge does. */
+export function findTemplatePaths(entries: TreeEntry[], dirs: readonly string[] = TEMPLATE_DIRS): string[] {
+  for (const dir of dirs) {
     const prefix = `${dir}/`;
     const files = entries
       .map((e) => e.path)

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TEMPLATE_DIRS } from "../pipeline/templates";
 import {
   ForgeError,
   type CreateIssueInput,
@@ -78,6 +79,8 @@ const encodePath = (path: string) => path.split("/").map(encodeURIComponent).joi
  * never included in an error message.
  */
 export class GiteaForge implements ForgeClient {
+  readonly label = "Gitea";
+  readonly templateDirs = TEMPLATE_DIRS;
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
   private readonly backoffMs: (attempt: number) => number;
@@ -178,7 +181,7 @@ export class GiteaForge implements ForgeClient {
     const res = await this.requestOnce(`${this.repoPath(owner, repo)}/issues`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ title: input.title, body: input.body, labels: input.labelIds }),
+      body: JSON.stringify({ title: input.title, body: input.body, labels: input.labels.map((l) => l.id) }),
     });
     if (res.status !== 201) {
       throw new ForgeError(`create issue returned ${res.status}`, res.status, res.status === 429 || res.status >= 500);

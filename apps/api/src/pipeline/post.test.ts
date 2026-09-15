@@ -13,7 +13,7 @@ function baseDetail(overrides: Partial<DraftDetail> = {}): DraftDetail {
     id: DRAFT_ID,
     run_id: null,
     repo_id: "repo-1",
-    repo: { owner: "TrueRoster", name: "app" },
+    repo: { forge: "gitea", owner: "TrueRoster", name: "app" },
     title: "Add schema",
     body: "Do the thing.",
     template_name: null,
@@ -99,7 +99,7 @@ describe("postDraft", () => {
     const forge = fakeForge({
       listLabels: async () => [{ id: 1, name: "backend" }],
       createIssue: async (_o, _r, input) => {
-        expect(input.labelIds).toEqual([1]);
+        expect(input.labels.map((l) => l.id)).toEqual([1]);
         expect(input.body).toContain("**Depends on:** #12");
         expect(input.body).toContain(`<!-- issue-pipeline:draft:${DRAFT_ID} -->`);
         return { number: 42, url: "https://git.example.com/o/r/issues/42" };

@@ -1,3 +1,5 @@
+import { GiteaLinkedElsewhere } from "../db/users";
+import type { ForgeUser } from "../forge/types";
 import { apiError } from "../http";
 import { passesCsrfCheck } from "./csrf";
 import {
@@ -15,10 +17,12 @@ import {
   OAUTH_STATE_MAX_AGE_SECONDS,
   SESSION_COOKIE,
   clearCookieHeader,
+  hasGitea,
   oauthStateSchema,
   readCookie,
   seal,
   sessionCookieHeader,
+  sessionSchema,
   setCookieHeader,
   unseal,
   type OAuthState,
@@ -30,14 +34,29 @@ export interface LoginDeps extends AuthDeps {
     cfg: OAuthConfig,
     params: { code: string; codeVerifier: string; redirectUri: string },
   ): Promise<TokenResult>;
+  /** Attach a Gitea identity to a signed-in, Gitea-less account (decision 22) instead of creating a second one. */
+  linkGitea(userId: string, forgeUser: ForgeUser): ReturnType<AuthDeps["upsertUser"]>;
 }
 
 /** Reasons the login screen knows how to explain. */
-export type LoginError = "denied" | "not_member" | "expired" | "failed" | "unavailable";
+export type LoginError =
+  | "denied"
+  | "not_member"
+  | "expired"
+  | "failed"
+  | "unavailable"
+  | "gitea_already_linked"
+  | "github_denied"
+  | "github_expired"
+  | "github_failed"
+  | "github_unavailable"
+  | "github_not_allowed"
+  | "github_link_expired"
+  | "github_already_linked";
 
 const NO_STORE = { "cache-control": "no-store" };
 
-function redirect(location: string, cookies: string[], extraHeaders: Record<string, string> = {}): Response {
+export function redirect(location: string, cookies: string[], extraHeaders: Record<string, string> = {}): Response {
   const headers = new Headers({ location, ...NO_STORE, ...extraHeaders });
   for (const cookie of cookies) headers.append("set-cookie", cookie);
   return new Response(null, { status: 302, headers });
@@ -91,6 +110,13 @@ export async function handleCallback(req: Request, deps: LoginDeps): Promise<Res
     return fail("failed");
   }
 
+  // A signed-in, Gitea-less account (decision 22, from GitHub sign-up)
+  // connecting Gitea for the first time links to it instead of creating a
+  // second account.
+  const existingSession = unseal(SESSION_COOKIE, readCookie(req, SESSION_COOKIE), keys, sessionSchema);
+  const linking =
+    existingSession && !hasGitea(existingSession) && now - existingSession.session_started_at < deps.sessionMaxAgeSeconds();
+
   let accessToken: string | undefined;
   try {
     const cfg = deps.oauth();
@@ -110,7 +136,18 @@ export async function handleCallback(req: Request, deps: LoginDeps): Promise<Res
     if (!(await forge.isOrgMember(deps.allowedOrg(), forgeUser.username))) {
       return fail("not_member");
     }
-    const user = await deps.upsertUser(forgeUser);
+
+    let user;
+    if (linking) {
+      try {
+        user = await deps.linkGitea(existingSession!.uid, forgeUser);
+      } catch (err) {
+        if (err instanceof GiteaLinkedElsewhere) return fail("gitea_already_linked");
+        throw err;
+      }
+    } else {
+      user = await deps.upsertUser(forgeUser);
+    }
 
     const session: Session = {
       uid: user.id,

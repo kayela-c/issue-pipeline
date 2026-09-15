@@ -10,6 +10,7 @@ import {
   recordLinkFailed,
   recordReconciledLinks,
 } from "../../src/db/drafts";
+import { forgeForDraft } from "../../src/forge/forRepo";
 import { HttpError, json, requireUuid } from "../../src/http";
 import { reconcileDraft } from "../../src/pipeline/post";
 
@@ -29,13 +30,13 @@ async function detailOrThrow(id: string): Promise<DraftDetail> {
 }
 
 /**
- * POST: resolve a `posting` stuck for over 5 minutes by searching Gitea for
- * the draft's marker, or retry unlinked dependency links on a `posted` draft
- * (docs/ARCHITECTURE.md section 7).
+ * POST: resolve a `posting` stuck for over 5 minutes by searching the repo's
+ * forge for the draft's marker, or retry unlinked dependency links on a
+ * `posted` draft (docs/ARCHITECTURE.md section 7).
  */
-export default withAuth(async (_req, { user, forge }, context) => {
+export default withAuth(async (_req, auth, context) => {
   const id = requireUuid(context.params.id, "Draft");
-  await reconcileDraft(id, user.id, forge, store);
+  await reconcileDraft(id, auth.user.id, await forgeForDraft(auth, id), store);
   return json(await detailOrThrow(id));
 });
 

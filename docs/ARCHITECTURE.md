@@ -12,7 +12,7 @@
 2. Items marked **VERIFY** must be checked against the real Gitea instance, Netlify plan, or current docs before the code depends on them. If a VERIFY item turns out false, stop and report instead of improvising a workaround.
 3. Do not add dependencies beyond those listed without flagging them first. No LangChain or agent frameworks: AI calls go through the small clients in `apps/api/src/llm` (the `@anthropic-ai/sdk` for Anthropic and LM Studio, plain REST for Gemini).
 4. Standalone utility scripts (seeding, smoke tests, maintenance) are written in **Python**. Application code is TypeScript (API and UI).
-5. A token or API key must never be logged, placed in a URL, or made readable by browser JavaScript. The sign-in Gitea token exists at rest only inside the encrypted, `HttpOnly` session cookie (Section 5). Credentials a user adds in Settings (AI provider keys, and from Phase 8 forge connection tokens) are stored in Postgres **only as AES-256-GCM ciphertext** under `CREDENTIALS_KEY`, decrypted only inside the function that uses them, and never returned by the API (responses carry at most `has_key` and the last 4 characters). Changed 2026-09-14, decision 21.
+5. A token or API key must never be logged, placed in a URL, or made readable by browser JavaScript. The sign-in Gitea token exists at rest only inside the encrypted, `HttpOnly` session cookie (Section 5). Credentials a user adds in Settings (AI provider keys; the linked Gitea refresh token snapshot from Phase 8's GitHub sign-in; and from Phase 9, forge connection tokens) are stored in Postgres **only as AES-256-GCM ciphertext** under `CREDENTIALS_KEY`, decrypted only inside the function that uses them, and never returned by the API (responses carry at most `has_key`/linked-username and the last 4 characters). Changed 2026-09-14, decision 21.
 6. Keep this file ASCII-only.
 
 ---
@@ -83,7 +83,7 @@ issue-pipeline/
 |   |   |   +-- lib/auth.ts           # session hooks (useMe, logout, login error messages)
 |   |   |   +-- lib/router.ts         # tiny history-API router (no router dependency)
 |   |   |   +-- routes/               # Login, Home (nav), NewIssue, Queue, RunView, Board, DraftEditor, Repos, Settings
-|   |   |   +-- routes/settings/      # AiSettings, Templates (Connections arrives in Phase 8)
+|   |   |   +-- routes/settings/      # AiSettings, Templates, Connections
 |   |   |   +-- components/Markdown.tsx  # react-markdown, raw HTML never rendered
 |   |   +-- public/api-not-found.json # JSON 404 for unknown /api paths
 |   |   +-- vite.config.ts            # build-time CSP meta tag
@@ -143,28 +143,61 @@ issue-pipeline/
 
 ## 4. Data model (Neon Postgres)
 
-Defined in Drizzle (`apps/api/src/db/schema.ts`); migrations are generated with `drizzle-kit` and applied with `pnpm db:migrate`. Applied so far: `0000_init`, `0001_snapshot_routing` (adds `repo_snapshots.routing` and clears cached snapshots), `0002_user_ai_settings` (Phase 6; applied to both the Neon `dev` and `main` branches, 2026-09-14), `0003_issue_templates` (Phase 7; applied to both the Neon `dev` and `main` branches, 2026-09-14). Statuses use `text` + `CHECK` rather than enums so they are easy to extend.
+Defined in Drizzle (`apps/api/src/db/schema.ts`); migrations are generated with `drizzle-kit` and applied with `pnpm db:migrate`. Applied so far: `0000_init`, `0001_snapshot_routing` (adds `repo_snapshots.routing` and clears cached snapshots), `0002_user_ai_settings` (Phase 6; applied to both the Neon `dev` and `main` branches, 2026-09-14), `0003_issue_templates` (Phase 7; applied to both the Neon `dev` and `main` branches, 2026-09-14), `0004_user_identities` and `0005_nullable_gitea` (Phase 8; both applied to the Neon `dev` branch 2026-09-14; `0005` drops the `NOT NULL` on `users.gitea_id` and `user_identities.gitea_refresh_token_enc` for GitHub-created accounts, decision 22), `0006_github_repos` (Phase 9; applied to the Neon `dev` branch 2026-09-15; adds `repos.forge`, widens the repo unique key to `(forge, owner, name)`, and adds `user_identities.access_token_enc`). None of `0004`-`0006` is on the Neon `main` branch yet. Statuses use `text` + `CHECK` rather than enums so they are easy to extend.
 
 There is deliberately **no sessions table**: session state lives in the encrypted cookie (Section 5).
 
 ```sql
 CREATE TABLE users (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  gitea_id      bigint UNIQUE NOT NULL,
+  -- Null for an account created directly by a non-Gitea sign-in (decision 22)
+  -- that has not connected Gitea yet. Postgres UNIQUE allows any number of
+  -- NULLs, so this stays a plain unique constraint.
+  gitea_id      bigint UNIQUE,
   username      text NOT NULL,
   display_name  text,
   created_at    timestamptz NOT NULL DEFAULT now(),
   last_seen_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- Phase 8: one account, any number of linked forge identities (decision 22).
+-- Gitea sign-in still creates the account by default (users.gitea_id); GitHub
+-- sign-in can now create one directly too, with gitea_id left null.
+CREATE TABLE user_identities (
+  user_id                  uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  forge                    text NOT NULL CHECK (forge IN ('github','gitlab','bitbucket')),
+  forge_user_id            text NOT NULL,
+  username                 text NOT NULL,
+  -- Snapshot of the account's Gitea refresh token, AES-256-GCM ciphertext
+  -- under CREDENTIALS_KEY, AAD
+  -- "user_identities.gitea_refresh_token:<user_id>:<forge>". A sign-in
+  -- through this identity refreshes it (Gitea rotates on every use), since
+  -- every tracked repo lives on Gitea today and this is what mints a working
+  -- Gitea session with no Gitea prompt (Section 5). Null when the account has
+  -- no Gitea link at all yet -- signing in through this identity then signs
+  -- straight in, Gitea-less, rather than minting anything.
+  gitea_refresh_token_enc  text,
+  -- Phase 9: this forge's own access token, for reading and posting to repos
+  -- hosted there. AES-256-GCM under CREDENTIALS_KEY, AAD
+  -- "user_identities.access_token:<user_id>:<forge>". Refreshed on every
+  -- sign-in or link through this identity; null when the grant lacked repo
+  -- access (GitHub: the `repo` scope). GitHub OAuth App tokens do not expire.
+  access_token_enc         text,
+  created_at               timestamptz NOT NULL DEFAULT now(),
+  updated_at               timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, forge),
+  UNIQUE (forge, forge_user_id)
+);
+
 CREATE TABLE repos (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  forge           text NOT NULL DEFAULT 'gitea' CHECK (forge IN ('gitea','github')),  -- Phase 9
   owner           text NOT NULL,
   name            text NOT NULL,
   default_branch  text NOT NULL,
   added_by        uuid REFERENCES users(id),
   created_at      timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (owner, name)
+  UNIQUE (forge, owner, name)
 );
 
 -- Cached repo read, keyed by commit so an unchanged repo is never re-read.
@@ -349,6 +382,8 @@ Zero rows means the draft is not approved, has unposted dependencies, or was cla
 | `GITEA_ALLOWED_ORG` | Org short name; only its members may use the app |
 | `GITEA_OAUTH_CLIENT_ID` | Gitea OAuth2 application (confidential) |
 | `GITEA_OAUTH_CLIENT_SECRET` | Its client secret. Server-side only |
+| `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET` | GitHub OAuth App for sign-in (Phase 8, decision 22) and repository access (Phase 9, decision 23); requests `read:user repo` |
+| `GITHUB_ALLOWED_USERS` | Comma-separated GitHub usernames allowed to sign in or link (case-insensitive). Empty or unset means nobody -- the button is shown but every attempt fails |
 | `SESSION_SECRET` | 32 random bytes, base64. Encrypts session and login-state cookies |
 | `SESSION_SECRET_PREVIOUS` | Optional. Old key accepted for decryption during rotation |
 | `SESSION_MAX_AGE_DAYS` | Absolute session lifetime, default `7` |
@@ -365,6 +400,7 @@ Two cookies, both encrypted with AES-256-GCM under `SESSION_SECRET` (the previou
 |---|---|---|
 | `__Host-ip_session` | `{ uid, gitea_id, username, access_token, refresh_token, access_expires_at, session_started_at }` | `HttpOnly; Secure; SameSite=Lax; Path=/`; `Max-Age` = time left of `SESSION_MAX_AGE_DAYS` |
 | `__Host-ip_oauth` | `{ state, code_verifier, return_to, created_at }` | `HttpOnly; Secure; SameSite=Lax; Path=/`; `Max-Age=600`; deleted at callback |
+| `__Host-ip_github_oauth` | `{ state, return_to, created_at }` (no PKCE verifier -- GitHub's OAuth App exchange is a confidential-client `client_secret` request, server-side only) | Same attributes and lifetime as `__Host-ip_oauth`; deleted at the GitHub callback |
 
 - `SameSite=Lax` is required: the OAuth callback is a top-level navigation arriving from Gitea, and it must carry the login-state cookie.
 - Browsers accept `Secure` cookies on `http://localhost`, so the `__Host-` names work under `netlify dev`.
@@ -378,10 +414,12 @@ Two cookies, both encrypted with AES-256-GCM under `SESSION_SECRET` (the previou
 | GET | `/api/auth/login?return_to=` | Generate `state` and PKCE `code_verifier` / S256 `code_challenge`; set `__Host-ip_oauth`; 302 to `{GITEA}/login/oauth/authorize` with `client_id`, `redirect_uri`, `response_type=code`, `scope`, `state`, `code_challenge`, `code_challenge_method=S256`. `return_to` must be a relative, non-API path; anything else becomes `/`. |
 | GET | `/api/auth/callback` | Require `__Host-ip_oauth` (less than 10 minutes old) and a matching `state`; on Gitea `error`, 302 to `/login?error=denied`. Exchange the code at `{GITEA}/login/oauth/access_token` with `client_id`, `client_secret`, `code_verifier`, `redirect_uri`. `GET /api/v1/user`, then the org membership check: a non-member gets **no session** and a 302 to `/login?error=not_member`. Otherwise upsert `users`, set `__Host-ip_session`, delete `__Host-ip_oauth`, and 302 to `return_to`. Sends `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. Other login errors: `expired`, `failed`, `unavailable`. |
 | POST | `/api/auth/logout` | CSRF check; delete the session cookie; 204. |
+| GET | `/api/auth/github/login?return_to=` | Set `__Host-ip_github_oauth`; 302 to `https://github.com/login/oauth/authorize` with `scope=read:user`. Works whether or not the caller is signed in (see below). |
+| GET | `/api/auth/github/callback` | Finish GitHub OAuth; behaviour depends on whether a valid `__Host-ip_session` is already present (see "GitHub sign-in" below). |
 
 - Each auth route is its own function file: for cross-origin requests `netlify dev` retries the path with `/index.html` appended, which breaks routing on `pathname` inside one function.
-- `redirect_uri` is `{request origin}/api/auth/callback`. Confidential clients get an **exact** redirect match in Gitea, so each origin must be registered on the OAuth app: the production URL and `http://localhost:8888` (not `127.0.0.1`). Deploy previews are not registered, so sign-in does not work there (non-goal).
-- **Scopes:** `read:user read:organization read:repository write:issue`. Gitea 1.25 silently widens a token to *all* scopes if any requested name is invalid, so the scope string is a constant with a unit test.
+- `redirect_uri` is `{request origin}/api/auth/callback` (or `/api/auth/github/callback`). Confidential clients get an **exact** redirect match, so each origin must be registered on both the Gitea and the GitHub OAuth app: the production URL and `http://localhost:8888` (not `127.0.0.1`). Deploy previews are not registered, so sign-in does not work there (non-goal).
+- **Scopes:** `read:user read:organization read:repository write:issue` for Gitea. Gitea 1.25 silently widens a token to *all* scopes if any requested name is invalid, so the scope string is a constant with a unit test. GitHub's OAuth App asks only `read:user` -- enough to read the account's id and username, nothing else -- since it is used for identity, not repo access.
 
 ### Auth wrapper -- `withAuth(handler)`
 
@@ -389,13 +427,40 @@ Accepts **either** the session cookie (browsers) **or** `Authorization: Bearer <
 
 1. **CSRF (cookie requests only).** For any method other than GET/HEAD/OPTIONS, require an `Origin` header equal to the request's own origin, `Sec-Fetch-Site` (when sent) of `same-origin`, and `Content-Type: application/json` when there is a body. Otherwise 403.
 2. **Credentials.** Decrypt the session cookie, or read the bearer token. Missing, undecryptable, or past `SESSION_MAX_AGE_DAYS` -> 401 (and clear the cookie).
-3. **Refresh (cookie requests only).** If `access_expires_at` is within **20 minutes**, POST `grant_type=refresh_token` with `client_id` + `client_secret`. On success, store the rotated tokens and re-issue the cookie on the response. If Gitea rejects the refresh token -> 401 and clear the cookie. On a network error or Gitea 5xx -> 502, keeping the cookie. The 20-minute margin guarantees any token forwarded to a background job outlives its 15-minute limit.
-4. `GET {GITEA_BASE_URL}/api/v1/user` with the token; 401/403 -> 401. For cookie requests, the returned id must equal the session's `gitea_id`.
-5. `GET /api/v1/orgs/{GITEA_ALLOWED_ORG}/members/{username}` without following redirects; only a direct 204 counts as membership, otherwise 403.
-6. Upsert `users` by `gitea_id`, update `last_seen_at`.
-7. Call `handler(req, { user, giteaToken, forge }, context)`, where `forge` is a `GiteaForge` bound to the token.
+3. **Gitea-less gate (cookie requests only, decision 22).** A session with `gitea_id: null` (an account created directly by GitHub, not yet connected to Gitea) is refused here, before anything below touches Gitea: 403 `forbidden` with `details.reason = "gitea_required"`. Every tracked repo lives on Gitea, so there is nothing this wrapper's callers can do for such an account; `/api/me` is the one exception (below).
+4. **Refresh (cookie requests only).** If `access_expires_at` is within **20 minutes**, POST `grant_type=refresh_token` with `client_id` + `client_secret`. On success, store the rotated tokens and re-issue the cookie on the response. If Gitea rejects the refresh token -> 401 and clear the cookie. On a network error or Gitea 5xx -> 502, keeping the cookie. The 20-minute margin guarantees any token forwarded to a background job outlives its 15-minute limit.
+5. `GET {GITEA_BASE_URL}/api/v1/user` with the token; 401/403 -> 401. For cookie requests, the returned id must equal the session's `gitea_id`.
+6. `GET /api/v1/orgs/{GITEA_ALLOWED_ORG}/members/{username}` without following redirects; only a direct 204 counts as membership, otherwise 403.
+7. Upsert `users` by `gitea_id`, update `last_seen_at`.
+8. Call `handler(req, { user, giteaToken, forge }, context)`, where `forge` is a `GiteaForge` bound to the token.
 
 Tokens are held in memory for the request only. Log paths and statuses, never headers or cookies, and scrub the token from any logged error text.
+
+### GitHub sign-in and account linking (decision 22)
+
+One account, any number of linked forge identities -- Gitea plus GitHub now, GitLab and Bitbucket later -- any of which can sign in to the *same* account. The account itself can be created by **either** Gitea sign-in (as always) **or** GitHub sign-in; there is no primary forge. What is fixed is that every tracked repo lives on Gitea until Phase 9, so an account with no Gitea link yet can sign in and see who it is, but cannot use any Gitea-backed feature (all of them, today) until it connects Gitea too -- the web app shows a "Connect Gitea to continue" screen for that state (Section 8) instead of blocking sign-in outright.
+
+`user_identities` (Section 4) holds every non-Gitea link: one row per `(user, forge)`, unique on `(forge, forge_user_id)` so a GitHub account can only ever link to one app account (`IdentityLinkedElsewhere`, `src/db/identities.ts`). Its `gitea_refresh_token_enc` is null until the account has a Gitea link; once it does, it holds a sealed snapshot of that account's Gitea **refresh token** (same pattern as Settings API keys, AAD `user_identities.gitea_refresh_token:<user_id>:<forge>`) -- what lets a later GitHub sign-in mint a real Gitea session with no Gitea prompt.
+
+A second, independent allow-list, `GITHUB_ALLOWED_USERS`, is GitHub's access gate: there is no GitHub org equivalent to `GITEA_ALLOWED_ORG` to check against, so every GitHub sign-in or link checks this list first, whether or not it ends up touching Gitea.
+
+`GET /api/auth/github/callback` (`src/auth/githubHandlers.ts`) reads any existing `__Host-ip_session` cookie *before* doing anything else, and branches on it:
+
+- **A valid session is present (link mode):** the caller is already signed in (with or without a Gitea link). Exchange the code, fetch the GitHub user, check the allow-list, then upsert `user_identities` with the session's *current* Gitea refresh token as the snapshot (null if the signed-in account has none itself yet). `github_already_linked` if that GitHub account already links to a different user.
+- **No valid session (login mode):** exchange the code, fetch the GitHub user, check the allow-list, then look up `user_identities` by `(github, forge_user_id)`:
+  - **Not found:** create a brand-new account (`users.gitea_id = null`) and link this GitHub identity to it, Gitea-less. This is the only way an account can exist with no Gitea link at all.
+  - **Found, no Gitea link (`gitea_refresh_token_enc` null):** sign straight into that account -- no Gitea call, nothing to refresh.
+  - **Found, with a Gitea link:** decrypt the stored refresh token and call Gitea's own `refresh_token` grant (`src/auth/oauth.ts::refreshTokens`, the same one `withAuth` uses). A rejected refresh (revoked, expired) -> `github_link_expired`. On success, `GET /api/v1/user` and **re-run the `GITEA_ALLOWED_ORG` membership check** with the fresh token -- a GitHub sign-in re-verifies org membership exactly like a direct Gitea sign-in, so someone removed from the org loses access through either door. Build and set `__Host-ip_session` exactly as `handleCallback` does, and overwrite the stored snapshot with the rotated refresh token (`touchGithubIdentityToken`) -- otherwise the next GitHub sign-in would fail.
+
+**The reverse direction** -- an account created by GitHub connecting Gitea afterward -- runs through the *existing* `GET /api/auth/callback` (Gitea's own), which now does the same existing-session check: a valid but Gitea-less session at callback time means "attach this Gitea identity to my account" (`linkGiteaToUser`, `src/db/users.ts`) instead of the normal create-or-find-by-`gitea_id` (`upsertUser`). The org membership check still runs first either way. `gitea_already_linked` if that Gitea account already belongs to a different user; `linkGiteaToUser` is otherwise idempotent for a repeat of the same link.
+
+Both callbacks share the `LoginError` vocabulary (`/login?error=...`), Gitea's own codes plus `gitea_already_linked` and the `github_`-prefixed ones, so the login screen can tell every failure apart. See `src/auth/github.ts` (GitHub OAuth mechanics), `src/auth/githubHandlers.ts` (GitHub's two branches), `src/auth/handlers.ts` (Gitea's link-mode addition), and `src/db/identities.ts` / `src/db/users.ts`.
+
+`GET /api/settings/connections` lists the caller's linked forges (username, linked-at, never the token); `DELETE /api/settings/connections/:forge` unlinks one (does not touch the account's Gitea link either way).
+
+### `withAccount(handler)` -- the one Gitea-less-safe wrapper
+
+`GET /api/me` (`src/auth/withAccount.ts`) is deliberately lighter than `withAuth`: it decrypts the session and loads the `users` row by id, with **no Gitea call at all** -- no refresh, no org re-check. That is the only way a Gitea-less account can learn who it is signed in as and get routed to "Connect Gitea to continue" (Section 8) instead of an opaque 403. It grants nothing beyond that: every other endpoint stays behind `withAuth`, which does require Gitea and re-checks `GITEA_ALLOWED_ORG` on every request. One consequence: a Gitea-linked account that loses org membership mid-session now finds out on its next *data* call rather than on `/api/me` itself -- `/api/me` no longer re-verifies org membership, since it must also work without Gitea at all.
 
 ### `ForgeClient` interface (`src/forge/types.ts`)
 
@@ -583,21 +648,22 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 
 ### Sign-in
 
-- "Sign in with Gitea" is a plain navigation to `/api/auth/login?return_to=...` (not `fetch`), so the whole OAuth flow is top-level redirects.
-- `/login?error=` (`denied`, `not_member`, `expired`, `failed`, `unavailable`) renders an explanatory message.
-- On load, `GET /api/me` decides between the signed-in app and the sign-in screen.
+- "Sign in with Gitea" and "Sign in with GitHub" are plain navigations (`/api/auth/login?return_to=...`, `/api/auth/github/login?return_to=...`, not `fetch`), so each OAuth flow is top-level redirects. Either can create the account (decision 22); "Sign in with GitLab" is shown disabled ("coming soon", Phase 10).
+- `/login?error=` renders an explanatory message: `denied`, `not_member`, `expired`, `failed`, `unavailable`, `gitea_already_linked` for Gitea; `github_denied`, `github_expired`, `github_failed`, `github_unavailable`, `github_not_allowed`, `github_link_expired`, `github_already_linked` for GitHub (Section 5).
+- On load, `GET /api/me` (`withAccount`, not `withAuth` -- Section 5) decides between the sign-in screen (401), the signed-in app (`gitea_id` set), and "Connect Gitea to continue" (`gitea_id: null`, decision 22).
 
 ### Screens
 
 | Screen | Path | Contents |
 |---|---|---|
-| Sign in | `/login` | "Sign in with Gitea" button; error states |
+| Sign in | `/login` | "Sign in with Gitea", "Sign in with GitHub" buttons (either creates the account, decision 22); "Sign in with GitLab" shown disabled; error states |
+| Connect Gitea | shown instead of the app | For a signed-in, Gitea-less account (created by GitHub, decision 22): explains that every tracked repo lives on Gitea, a "Connect Gitea" button (the same Gitea OAuth flow, now in link mode -- Section 5), and Sign out |
 | New issue | modal from the nav bar | Repo select, template select ("Repository's own templates" by default, or an app template offered for the repo's forge), notes text area -> submit -> lands on the Queue with the new run expanded. The run detail shows which template was used |
 | Queue | `/queue`, `/queue/<run id>` | Every run, in-progress first, then recent: status pill, repo, author, time, notes excerpt, error, draft counts by status. Clicking a row expands its progress steps, commit, model, tokens, notes, retry (when failed), and drafts (rendered Markdown, linked to the editor). Old `/runs/<id>` links redirect here |
 | Board | `/board?repo=<id>` | Columns by status: Draft, Approved, Posting, Posted, Failed; repo filter (or all repos). Cards: title, repo, labels, "Blocked by N unposted drafts", issue number, approver |
 | Draft editor | `/drafts/<id>` | Status, repo, template, author, approver, Gitea link. While `draft`: title, body with Write / Preview tabs, label chips (repo labels live from Gitea), dependency checkboxes (same-repo drafts with their status), Save, Approve (disabled while there are unsaved changes), Delete with inline confirm. While `approved`: read-only view with Unapprove. "Needed by" list and event history. A stale save or approval shows **"Edited by someone else"** with Reload; the editor also polls every 15 s and flags a newer version if the form has unsaved edits |
 | Repositories | `/repos` | Tracked repos; search accessible repos and track one (disabled for archived repos or repos with issues turned off) |
-| Settings | `/settings/ai`, `/settings/connections`, `/settings/templates` | Sub-tabs. **AI model:** radio list of "Team default (<provider>)", Anthropic, Gemini, Grok, OpenAI, Venice (saved on click, badges for "your key" / "team key"). Choosing a provider shows its panel: API key (password field; a saved key shows only "ending in ...abcd" with Replace/Remove), select and draft model fields with suggestions listed live from the provider (free text allowed), Save, and Test (disabled while unsaved). A warning shows when neither the user nor the team has a key. **Templates:** list of team templates (format and forge badges, derived file name, last editor) with New and Edit. The editor has name, "Offered for" forge chips, format radios (Issue form disabled when a Markdown-only forge is chosen), a monospace content area with "Start from an example", and a live preview from `/api/template-preview`: errors (which disable Save), notes, title prefix/about/labels, then the rendered Markdown body or the form's `### label` sections with type, required, and options. Save handles a stale version with Reload; Delete asks inline and says existing runs keep their copy. Connections is a placeholder until Phase 8 |
+| Settings | `/settings/ai`, `/settings/connections`, `/settings/templates` | Sub-tabs. **AI model:** radio list of "Team default (<provider>)", Anthropic, Gemini, Grok, OpenAI, Venice (saved on click, badges for "your key" / "team key"). Choosing a provider shows its panel: API key (password field; a saved key shows only "ending in ...abcd" with Replace/Remove), select and draft model fields with suggestions listed live from the provider (free text allowed), Save, and Test (disabled while unsaved). A warning shows when neither the user nor the team has a key. **Templates:** list of team templates (format and forge badges, derived file name, last editor) with New and Edit. The editor has name, "Offered for" forge chips, format radios (Issue form disabled when a Markdown-only forge is chosen), a monospace content area with "Start from an example", and a live preview from `/api/template-preview`: errors (which disable Save), notes, title prefix/about/labels, then the rendered Markdown body or the form's `### label` sections with type, required, and options. Save handles a stale version with Reload; Delete asks inline and says existing runs keep their copy. **Connections:** one row per connectable forge (GitHub, GitLab, Bitbucket) with a Connect or, once linked, "linked as \<username\>" and Disconnect; GitLab and Bitbucket show "coming soon" and no working Connect button until Phases 10-11 |
 | Card actions | built | Post and Unapprove on `approved` drafts, Retry on `failed`, Reconcile on `posting` (all in the draft editor); "Post all ready" on the board, scoped to the selected repo |
 
 **Markdown renders AI-written text, so it must not render raw HTML.** `components/Markdown.tsx` uses `react-markdown` with `skipHtml` and its default URL filter, and opens links in a new tab with `rel="noopener noreferrer"`. A test asserts script tags, event handlers, and `javascript:` links never reach the page. GitHub-flavoured extras (task-list checkboxes, tables) would need `remark-gfm`, not added; `- [ ]` checklists currently render as plain text in the preview.
@@ -700,7 +766,7 @@ Each phase ends with its acceptance criteria passing and a short summary back to
 - **Outstanding, owned by Kayela:** the Cloudflare rule above; confirm production environment variables on the Netlify site (Section 9 item 4); re-add `http://localhost:8888/api/auth/callback` to the Gitea OAuth app (it was removed when the production URI was added).
 - **Accept:** sign-in works on the production URL; the smoke test passes against production.
 
-Phases 6-10 add a **Settings** tab (decision 21). Settings are built and tested under `netlify dev` while production sign-in is blocked (Phase 5).
+Phases 6-11 add a **Settings** tab (decision 21). Settings are built and tested under `netlify dev` while production sign-in is blocked (Phase 5).
 
 ### Phase 6 -- Settings shell and per-user AI settings -- BUILT, awaiting acceptance (`16cfdf2`)
 - `CREDENTIALS_KEY` and encrypted credential columns (AES-256-GCM, AAD `"<table>:<column>:<user id>"`, previous key accepted during rotation), sharing its cipher core with the session cookie.
@@ -708,31 +774,43 @@ Phases 6-10 add a **Settings** tab (decision 21). Settings are built and tested 
 - `user_ai_settings` table. The client for a run is resolved for the user who triggered it: their provider with their own key -> their provider with the team's env key -> the env provider (today's behaviour) -> an error telling them to add a key.
 - `GET/PUT/DELETE /api/settings/ai` (key write-only), `GET /api/settings/ai/models?provider=`, `POST /api/settings/ai/test`.
 - Web: Settings nav item, `/settings/ai` page: provider choice; picking one shows its API key field (saved keys show only the last 4 characters) and the select/draft model pickers.
-- Deviations from the plan: the Test endpoint is not rate-limited yet (each click makes up to two small model calls on the caller's own key or the team's; rate limits are Phase 11 work). A retry uses the settings of whoever retries, since the job runs as the triggering user.
+- Deviations from the plan: the Test endpoint is not rate-limited yet (each click makes up to two small model calls on the caller's own key or the team's; rate limits are Phase 12 work). A retry uses the settings of whoever retries, since the job runs as the triggering user.
 - **Accept:** a user with their own key for a new provider runs drafting and `runs.model_draft` names that provider; a user with no settings still uses the env provider; no key appears in any API response or log line.
 
 ### Phase 7 -- Issue templates in Settings -- BUILT, awaiting acceptance
 - `issue_templates` (team-wide; forges it applies to; Markdown or YAML form; raw content), CRUD with optimistic `version`, server-side preview through `pipeline/templates.ts`.
 - Format options by forge: Gitea and GitHub offer Markdown or a YAML issue form; GitLab and Bitbucket offer Markdown only.
 - New issue modal picks "Repo's templates" (default) or an app template; the run snapshots the app template it used.
-- As built: the snapshot is taken at submission (in `POST /api/raw-issues`), not when the job starts, so a retry drafts with the same template even if it was edited or deleted meanwhile. Until Phase 8 adds `repos.forge`, every tracked repo counts as Gitea (`repoForge` in `src/settings/templates.ts`), so only templates offered for Gitea appear in the New issue picker. Templates are team-wide and anyone in the org can edit or delete them, matching the approval policy (decision 8).
+- As built: the snapshot is taken at submission (in `POST /api/raw-issues`), not when the job starts, so a retry drafts with the same template even if it was edited or deleted meanwhile. Until Phase 9 adds `repos.forge`, every tracked repo counts as Gitea (`repoForge` in `src/settings/templates.ts`), so only templates offered for Gitea appear in the New issue picker. Templates are team-wide and anyone in the org can edit or delete them, matching the approval policy (decision 8).
 - **Accept:** a YAML form made in Settings drives drafting and validation on a Gitea repo; editing it later does not change old runs.
 
-### Phase 8 -- Forge connections and GitHub
-- Forge-neutral columns (`repos.forge`/`base_url`, `drafts.issue_number`/`issue_url`, `draft_deps.linked_in_forge`) and `ForgeClient.capabilities` (labels, dependencies, issue forms, template dirs).
-- `forge_connections`: OAuth "Connect" per forge, tokens encrypted, refresh by compare-and-swap on `token_version` so rotating refresh tokens survive concurrent requests. Gitea sign-in and the org gate are unchanged.
-- `GitHubForge` through a GitHub App (Issues write, Contents read, Metadata). A repo on a forge the caller has not connected answers 409 `not_connected`.
-- **Accept:** connect GitHub, track a private repo, draft, approve, post as the user, dependencies linked or skipped with a recorded reason, reconcile finds a stuck post; a teammate without a connection gets the connect message.
+### Phase 8 -- GitHub sign-in and account linking -- BUILT, awaiting acceptance
+- `user_identities`, plus nullable `users.gitea_id` and `user_identities.gitea_refresh_token_enc` (migrations `0004` and `0005`, both applied to the Neon `dev` branch 2026-09-14); `GET /api/auth/github/login`, `GET /api/auth/github/callback` (`src/auth/github.ts`, `src/auth/githubHandlers.ts`); link-mode added to Gitea's own `GET /api/auth/callback` (`src/auth/handlers.ts`, `linkGiteaToUser` in `src/db/users.ts`); `GET/DELETE /api/settings/connections`; `GET /api/me` moved to the new, Gitea-optional `withAccount` wrapper; the login page's GitHub button, the Settings > Connections page, and the "Connect Gitea to continue" screen (`ConnectGitea` in `Home.tsx`).
+- One account, any number of linked forge identities (Gitea plus GitHub now); either Gitea or GitHub sign-in can create the account -- there is no primary forge. What is fixed: every tracked repo lives on Gitea until Phase 9, so an account with no Gitea link can sign in and see `/api/me`, but every other endpoint refuses it (`withAuth`'s `gitea_required` gate) until it connects Gitea, which the web app prompts for immediately. A second, independent allow-list (`GITHUB_ALLOWED_USERS`) gates who may sign in or link with GitHub at all, since GitHub has no equivalent of the org gate. Full design in Section 5.
+- **This changed mid-build** (2026-09-15): the plan going in was GitHub-links-to-an-existing-Gitea-account only; testing it live surfaced that this forces every new person through Gitea first with no way around it, which does not match "one account, several platform sign-ins, pick whichever you have" (Kayela's framing). Extended to let either forge create the account, with Gitea's own callback gaining the same link-mode logic GitHub's already had, in the other direction.
+- GitHub is identity only (`read:user` scope, a GitHub OAuth App): it does not give the app access to GitHub repos. That is Phase 9's separate GitHub App -- a Gitea-less account genuinely cannot do anything else yet, by design, until then.
+- GitLab's "Sign in with GitLab" button is shown on the login page and in Connections, disabled, until Phase 10.
+- **Accept:** sign in with GitHub as a brand-new account, see "Connect Gitea to continue", connect Gitea, land in the normal app as one account; separately, sign in with Gitea, link GitHub in Settings > Connections, sign out, sign in with "Sign in with GitHub" -> lands back as the same account; removing the caller from `GITEA_ALLOWED_ORG` then repeating a Gitea-backed GitHub sign-in fails with `not_member`; a GitHub username not in `GITHUB_ALLOWED_USERS` cannot link, sign in, or create an account.
 
-### Phase 9 -- GitLab
+### Phase 9 -- GitHub repositories -- BUILT, awaiting acceptance
+- `repos.forge` (`gitea` | `github`) with the unique key widened to `(forge, owner, name)`; `user_identities.access_token_enc` (migration `0006_github_repos`, Neon `dev` only).
+- `GitHubForge` (`src/forge/github.ts`) implements the whole `ForgeClient`: `/user/repos` (owner, collaborator, and org-member repos, filtered by name in memory), repo, branch head, recursive tree (a truncated tree is refused with 413 rather than drafted from partially), raw files via `contents` with the raw media type, labels (repo only -- GitHub has no org labels), issue creation with label *names*, dependencies through the issue-dependencies API (`POST .../issues/{n}/dependencies/blocked_by` with the blocking issue's database `id`, checked against the docs 2026-09-15), and reconcile via `issues?creator=&since=` with pull requests dropped. Rate-limited 403s are retried like 429s; `createIssue` stays single-attempt.
+- `ForgeClient` gained `label` ("Gitea"/"GitHub", for messages) and `templateDirs` (GitHub reads only `.github/ISSUE_TEMPLATE`); `CreateIssueInput.labelIds` became `labels: ForgeLabel[]` so each forge picks ids or names.
+- `forgeForRepo(caller, repo)` / `repoAndForge` / `forgeForDraft` (`src/forge/forRepo.ts`): Gitea repos use the caller's session forge exactly as before; GitHub repos load the caller's sealed token by user id on the server (background jobs too -- nothing is forwarded between functions). No token -> 409 `details.reason = "not_connected"`. Every forge-using endpoint goes through it: `GET /api/github/repos` (new), `POST /api/repos` (`forge` in the body, default `gitea`), repo labels, draft label validation, post, reconcile, post queue (checked before starting the job), raw issues and run retry (checked before creating or requeueing the run), and the drafting job (fails the run with the connect message).
+- GitHub sign-in now requests `read:user repo` and stores the access token on every sign-in or link when `repo` was granted (`saveGithubAccessToken`); Settings > Connections shows "no repository access yet" with Reconnect for a link made before this phase. Reconcile searches by the claimer's GitHub login for GitHub repos (`getReconcileContext` joins `user_identities`).
+- Web: Repositories has a Gitea/GitHub switch for search, forge badges on tracked repos, and a link to Connections on `not_connected`; New issue labels repos with their forge and offers app templates for that forge; the draft editor says "Post to GitHub"/"Open #N in GitHub" as appropriate.
+- **Deviations from the original Phase 9 plan:** an OAuth App with the broad `repo` scope instead of a GitHub App (decision 23), so there is no `forge_connections` table and no refresh/compare-and-swap (OAuth App tokens do not expire) -- the token lives on the existing `user_identities` row. The `gitea_*` draft columns and DTO fields (`gitea_number`, `gitea_url`, `linked_in_gitea`) were **not** renamed; they now hold the issue number/URL on whichever forge the repo is on. The app still needs a Gitea link to use anything (`withAuth`'s org gate, decision 22).
+- **Accept:** reconnect GitHub in Settings > Connections (approving the new `repo` scope); track a private GitHub repo; draft from it (its `.github/ISSUE_TEMPLATE` form drives validation); approve and post -- the issue appears on GitHub authored by you, with dependencies linked; reconcile finds a stuck post; a teammate without a GitHub connection gets the connect message instead of an error.
+
+### Phase 10 -- GitLab
 - `GitLabForge` (gitlab.com plus optional `GITLAB_BASE_URL`), Markdown description templates, issue links for dependencies, quick-action lines neutralized in AI-written bodies.
-- **Accept:** the Phase 8 flow on a GitLab project; quick-action sanitizing covered by a unit test.
+- **Accept:** the Phase 9 flow on a GitLab project; quick-action sanitizing covered by a unit test.
 
-### Phase 10 -- Bitbucket Cloud
+### Phase 11 -- Bitbucket Cloud
 - `BitbucketForge` with no labels, dependencies, or repo templates (app Markdown templates only); the UI says what is unsupported.
 - **Accept:** draft and post to a Bitbucket repo with an app template.
 
-### Phase 11 -- Hardening
+### Phase 12 -- Hardening
 - Rate limits, per-run token/cost display, audit history view, structured logging with token redaction, session and credential key rotation drill, local Gitea integration tests.
 - **Accept:** security checklist in Section 10 fully ticked.
 
@@ -767,7 +845,9 @@ Resolved:
 19. **`SECRETS_SCAN_OMIT_KEYS` added to `netlify.toml` (2026-09-14):** the first production deploy failed Netlify's secrets scan. It flags every env var configured on the site and fails the build if that literal value appears anywhere in the repo or build output; `GITEA_BASE_URL`, `GITEA_ALLOWED_ORG`, and `NODE_ENV` are legitimately non-secret and their values (an org name, a host, a build mode) collide with ordinary text throughout the code, tests, and this doc. `MODEL_SELECT` and `MODEL_DRAFT` were also flagged -- these are not env vars the app reads at all (see Section 5: the app reads `ANTHROPIC_MODEL_SELECT`/`ANTHROPIC_MODEL_DRAFT` or `GEMINI_MODEL_SELECT`/`GEMINI_MODEL_DRAFT`, prefixed by provider), so they were added to the omit list rather than chased down as real config. Real secrets (API keys, `SESSION_SECRET`, `DATABASE_URL`, `GITEA_OAUTH_CLIENT_SECRET`, `INTERNAL_JOB_SECRET`) are untouched and stay scanned.
 20. **Git branch layout settled as `main` (production) + `dev` (ongoing work), no `prod` branch (2026-09-14):** same-day back-and-forth. First, Netlify's production branch was set to a new `prod` branch, and git's `main` was renamed to `dev` to match (pushed as `origin/dev`; `origin/main` was left behind, briefly stale). Kayela then deleted `prod` and decided to keep the conventional `main` = production / `dev` = ongoing-work split instead. Net effect: git `main` still exists and is production again; git `dev` also exists (it carries the same history, since it was the renamed `main`) and is where ongoing work happens; `origin/prod` should be deleted if it still exists. GitHub's repository default-branch setting was never changed from `main` (the agent has no `gh` CLI or API access, so this would have been a manual step regardless), which conveniently matches the final decision. Git's `dev` branch is unrelated to the Neon *database* branch also called `dev` (item 2 above) -- same name, different systems, worth double-checking against in any future instruction that just says "dev."
 
-21. **Settings tab (2026-09-14):** Kayela asked for a Settings tab with per-user AI provider/model/key selection (Anthropic, Gemini, Grok, OpenAI, Venice), connections to GitHub, GitLab, and Bitbucket in addition to Gitea, and issue templates managed in the app. Choices: AI settings are per user with the env-var setup as the team fallback; Gitea sign-in and the org gate remain the only way in, other forges are OAuth "Connect" connections used for repo reads and posting; templates live in the database and a repo's own templates stay the default. This reverses rule 0.5 (credentials may now be stored, encrypted) and two v1 non-goals (Section 1). Venice (decision 10) is now supported through the OpenAI-compatible client. Built as Phases 6-10; hardening moves to Phase 11.
+21. **Settings tab (2026-09-14):** Kayela asked for a Settings tab with per-user AI provider/model/key selection (Anthropic, Gemini, Grok, OpenAI, Venice), connections to GitHub, GitLab, and Bitbucket in addition to Gitea, and issue templates managed in the app. Choices: AI settings are per user with the env-var setup as the team fallback; Gitea sign-in and the org gate remain the only way to *create* an account (superseded for GitHub specifically by decision 22); other forges are OAuth "Connect" connections used for repo reads and posting; templates live in the database and a repo's own templates stay the default. This reverses rule 0.5 (credentials may now be stored, encrypted) and two v1 non-goals (Section 1). Venice (decision 10) is now supported through the OpenAI-compatible client. Built as Phases 6-11; hardening moves to Phase 12.
+22. **GitHub sign-in and account linking (2026-09-14/15):** Kayela asked for GitHub (and later GitLab) as real sign-in options on the login page, not just Phase 9's repo-access "Connect". First round: the access gate is a separate allow-list, `GITHUB_ALLOWED_USERS` (not a GitHub org/team, since TrueRoster's equivalent does not exist on GitHub); since every tracked repo lives on Gitea until Phase 9, the app still mints a real Gitea session under a GitHub sign-in by storing (encrypted) a snapshot of the linked account's Gitea refresh token at link time, rather than bouncing the browser through a second, visible Gitea prompt on every GitHub sign-in -- a new category of stored secret (a live Gitea credential, not just a third-party API key), chosen explicitly over the token-free alternative for a true one-click sign-in. Built and tested against a live Gitea/GitHub locally 2026-09-15 as "GitHub links to an existing Gitea account, Gitea always comes first" -- Kayela's reaction: "why can't GitHub sign up like Gitea does? What if a user does not have Gitea?" **Revised same day:** one account, several forge identities, and *either* Gitea or GitHub can create the account -- there is no primary forge, matching "one user, multiple platform accounts, log in with whichever." An account with no Gitea link can still sign in and see `/api/me`, but every other endpoint needs Gitea (nothing else exists yet, forge-wise), so the app prompts it to connect Gitea instead of showing an empty app. This meant relaxing `users.gitea_id` and `user_identities.gitea_refresh_token_enc` to nullable, and Gitea's own OAuth callback gaining the reverse link-mode logic. Full design in Section 5. Built as Phase 8; GitLab's button is shown disabled until Phase 10.
+23. **GitHub repository access through the OAuth App (2026-09-15):** Kayela asked for the Repositories page to show her GitHub repos, and chose the full pipeline (track, draft, post) rather than listing only. Offered a least-privilege GitHub App (Issues write, Contents read, Metadata, granted per repo, expiring tokens -- the original Phase 9 plan) or reusing the Phase 8 OAuth App with the `repo` scope, she chose the OAuth App: no second app to create, and tokens that never expire. The cost, stated when choosing: `repo` is full read/write to every repository the user can reach, including code, and an org owner may need to approve the app for org repos. Tokens are sealed under `CREDENTIALS_KEY` like every other stored credential (rule 0.5). Built as Phase 9.
 
 Still to verify or decide before the phase that depends on them:
 

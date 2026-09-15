@@ -9,6 +9,7 @@ import {
   markDraftPosted,
   recordLinkFailed,
 } from "../../src/db/drafts";
+import { forgeForDraft } from "../../src/forge/forRepo";
 import { HttpError, json, requireUuid } from "../../src/http";
 import { postDraft } from "../../src/pipeline/post";
 
@@ -21,14 +22,15 @@ async function detailOrThrow(id: string): Promise<DraftDetail> {
 }
 
 /**
- * POST: post one approved draft as a Gitea issue now (docs/ARCHITECTURE.md
- * section 7). This only throws when the claim itself is refused; every other
- * outcome (posted, left `posting` for reconcile, or failed) is persisted and
- * shows up in the draft returned here.
+ * POST: post one approved draft as an issue on its repo's forge now
+ * (docs/ARCHITECTURE.md section 7). This only throws when the claim itself is
+ * refused (or the caller has not connected that forge); every other outcome
+ * (posted, left `posting` for reconcile, or failed) is persisted and shows up
+ * in the draft returned here.
  */
-export default withAuth(async (_req, { user, forge }, context) => {
+export default withAuth(async (_req, auth, context) => {
   const id = requireUuid(context.params.id, "Draft");
-  await postDraft(id, user.id, forge, store);
+  await postDraft(id, auth.user.id, await forgeForDraft(auth, id), store);
   return json(await detailOrThrow(id));
 });
 

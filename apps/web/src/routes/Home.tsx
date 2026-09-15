@@ -1,4 +1,5 @@
 import type { MeResponse } from "@issue-pipeline/shared";
+import { startLogin } from "../lib/api";
 import { useLogout } from "../lib/auth";
 import { useEffect, useState } from "react";
 import { Modal } from "../components/Modal";
@@ -76,6 +77,39 @@ export function Home({ me }: { me: MeResponse }) {
         </Modal>
       )}
     </>
+  );
+}
+
+/**
+ * Shown instead of the app when the signed-in account has no Gitea link
+ * (decision 22: an account created directly by GitHub sign-in). Every
+ * tracked repo lives on Gitea, so there is nothing to do here yet.
+ */
+export function ConnectGitea({ username }: { username: string }) {
+  const logout = useLogout();
+  const [redirecting, setRedirecting] = useState(false);
+
+  const connect = () => {
+    setRedirecting(true);
+    startLogin("/");
+  };
+
+  return (
+    <section className="card">
+      <h2>Connect Gitea to continue</h2>
+      <p className="muted spaced">
+        Signed in as <strong>{username}</strong>. Access to this app is checked through your Gitea organization membership, so
+        connect your Gitea account to continue. After that you can work with both Gitea and GitHub repositories.
+      </p>
+      <div className="actions">
+        <button type="button" onClick={connect} disabled={redirecting}>
+          {redirecting ? "Opening Gitea…" : "Connect Gitea"}
+        </button>
+        <button type="button" onClick={() => logout.mutate()} disabled={logout.isPending}>
+          Sign out
+        </button>
+      </div>
+    </section>
   );
 }
 

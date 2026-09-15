@@ -15,8 +15,10 @@ import {
 } from "drizzle-orm/pg-core";
 import {
   AI_PROVIDERS,
+  CONNECTABLE_FORGES,
   DRAFT_STATUSES,
   FORGES,
+  REPO_FORGES,
   RUN_STATUSES,
   TEMPLATE_CONTENT_MAX,
   TEMPLATE_KINDS,
@@ -50,24 +52,71 @@ const timestamptz = (name: string) => timestamp(name, { withTimezone: true });
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
-  giteaId: bigint("gitea_id", { mode: "number" }).notNull().unique(),
+  /** Null for an account created by GitHub sign-in that has not linked Gitea yet (decision 22). */
+  giteaId: bigint("gitea_id", { mode: "number" }).unique(),
   username: text("username").notNull(),
   displayName: text("display_name"),
   createdAt: timestamptz("created_at").notNull().defaultNow(),
   lastSeenAt: timestamptz("last_seen_at").notNull().defaultNow(),
 });
 
+/**
+ * A forge identity linked to an account -- GitHub now, GitLab and Bitbucket
+ * later. One account can have Gitea plus any number of these; any of them can
+ * sign in to the same account (decision 22).
+ *
+ * Every tracked repo lives on Gitea today (Phase 9 adds others), so signing
+ * in through a linked identity still needs a working Gitea session where one
+ * exists: linking stores a snapshot of the account's Gitea refresh token,
+ * AES-256-GCM ciphertext under CREDENTIALS_KEY (src/crypto/credentials.ts),
+ * AAD "user_identities.gitea_refresh_token:<user_id>:<forge>". Signing in
+ * through the link refreshes it, since Gitea rotates the token on every use.
+ * Null when the account has no Gitea link at all yet -- created directly by
+ * this identity, with nothing to snapshot until Gitea is connected too.
+ */
+export const userIdentities = pgTable(
+  "user_identities",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    forge: text("forge").notNull(),
+    forgeUserId: text("forge_user_id").notNull(),
+    username: text("username").notNull(),
+    giteaRefreshTokenEnc: text("gitea_refresh_token_enc"),
+    /**
+     * This forge's own access token, for reading and posting to repos hosted
+     * there (Phase 9). AES-256-GCM under CREDENTIALS_KEY, AAD
+     * "user_identities.access_token:<user_id>:<forge>". Null until the user
+     * signs in or connects with the repo scope granted.
+     */
+    accessTokenEnc: text("access_token_enc"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.forge] }),
+    unique("user_identities_forge_user_key").on(t.forge, t.forgeUserId),
+    check("user_identities_forge_check", sql`${t.forge} IN (${inList(CONNECTABLE_FORGES)})`),
+  ],
+);
+
 export const repos = pgTable(
   "repos",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    /** Which forge hosts the repo (Phase 9). Existing rows are all Gitea. */
+    forge: text("forge").notNull().default("gitea"),
     owner: text("owner").notNull(),
     name: text("name").notNull(),
     defaultBranch: text("default_branch").notNull(),
     addedBy: uuid("added_by").references(() => users.id),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
-  (t) => [unique("repos_owner_name_key").on(t.owner, t.name)],
+  (t) => [
+    unique("repos_forge_owner_name_key").on(t.forge, t.owner, t.name),
+    check("repos_forge_check", sql`${t.forge} IN (${inList(REPO_FORGES)})`),
+  ],
 );
 
 /** Cached repo read, keyed by commit so an unchanged repo is never re-read. */
@@ -289,3 +338,4 @@ export type DraftDep = typeof draftDeps.$inferSelect;
 export type DraftEventRow = typeof draftEvents.$inferSelect;
 export type UserAiProviderRow = typeof userAiProviders.$inferSelect;
 export type IssueTemplateRow = typeof issueTemplates.$inferSelect;
+export type UserIdentityRow = typeof userIdentities.$inferSelect;

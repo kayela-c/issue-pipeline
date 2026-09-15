@@ -1,4 +1,5 @@
 export * from "./auth.js";
+export * from "./connections.js";
 export * from "./drafts.js";
 export * from "./enums.js";
 export * from "./errors.js";

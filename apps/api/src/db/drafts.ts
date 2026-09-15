@@ -6,6 +6,7 @@ import type {
   DraftEvent,
   DraftRef,
   DraftStatus,
+  RepoForge,
 } from "@issue-pipeline/shared";
 import { getDb, schema } from "./client";
 
@@ -18,7 +19,7 @@ function draftQuery() {
   return getDb()
     .select({
       draft: schema.drafts,
-      repo: { owner: schema.repos.owner, name: schema.repos.name },
+      repo: { forge: schema.repos.forge, owner: schema.repos.owner, name: schema.repos.name },
       createdBy: createdBy.username,
       approvedBy: approvedBy.username,
     })
@@ -61,7 +62,7 @@ function toDto(row: DraftRow, deps: DraftRef[]): DraftDto {
     id: d.id,
     run_id: d.runId,
     repo_id: d.repoId,
-    repo: row.repo,
+    repo: { ...row.repo, forge: row.repo.forge as RepoForge },
     title: d.title,
     body: d.body,
     template_name: d.templateName,
@@ -411,30 +412,35 @@ export async function recordLinkFailed(input: {
 /** Everything reconcile needs to decide a stuck `posting`, or retry unlinked dependencies of a `posted` draft. */
 export interface ReconcileContext {
   status: DraftStatus;
+  /** The claiming user's username on the repo's forge: their Gitea username, or their linked GitHub login. */
   claimedByUsername: string | null;
   claimedAt: string | null;
   giteaNumber: number | null;
   repoOwner: string;
   repoName: string;
-  /** Dependencies that are themselves posted but not yet linked in Gitea. */
+  /** Dependencies that are themselves posted but not yet linked on the forge. */
   unlinkedDeps: Array<{ dependsOnId: string; giteaNumber: number }>;
 }
 
 export async function getReconcileContext(id: string): Promise<ReconcileContext | undefined> {
   const db = getDb();
   const claimedBy = alias(schema.users, "claimed_by_user");
+  const claimedByGithub = alias(schema.userIdentities, "claimed_by_github");
   const [row] = await db
     .select({
       status: schema.drafts.status,
       claimedAt: schema.drafts.claimedAt,
       claimedByUsername: claimedBy.username,
+      claimedByGithubLogin: claimedByGithub.username,
       giteaNumber: schema.drafts.giteaNumber,
+      repoForge: schema.repos.forge,
       repoOwner: schema.repos.owner,
       repoName: schema.repos.name,
     })
     .from(schema.drafts)
     .innerJoin(schema.repos, eq(schema.drafts.repoId, schema.repos.id))
     .leftJoin(claimedBy, eq(schema.drafts.claimedBy, claimedBy.id))
+    .leftJoin(claimedByGithub, and(eq(claimedByGithub.userId, schema.drafts.claimedBy), eq(claimedByGithub.forge, "github")))
     .where(eq(schema.drafts.id, id));
   if (!row) return undefined;
 
@@ -453,7 +459,8 @@ export async function getReconcileContext(id: string): Promise<ReconcileContext 
   return {
     status: row.status as DraftStatus,
     claimedAt: row.claimedAt?.toISOString() ?? null,
-    claimedByUsername: row.claimedByUsername,
+    // The issue was created with the claimer's token on the repo's forge, so search by their login there.
+    claimedByUsername: row.repoForge === "github" ? row.claimedByGithubLogin : row.claimedByUsername,
     giteaNumber: row.giteaNumber,
     repoOwner: row.repoOwner,
     repoName: row.repoName,

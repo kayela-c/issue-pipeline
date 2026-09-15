@@ -3,6 +3,7 @@ import { updateDraftRequestSchema, type DraftDetail } from "@issue-pipeline/shar
 import { withAuth } from "../../src/auth/withAuth";
 import { deleteDraft, getDraftDetail, getDraftState, updateDraftContent } from "../../src/db/drafts";
 import { getRepoById } from "../../src/db/repos";
+import { forgeForRepo } from "../../src/forge/forRepo";
 import { HttpError, json, readJson, requireUuid } from "../../src/http";
 import { refusal } from "../../src/pipeline/review";
 
@@ -17,7 +18,8 @@ async function detailOrThrow(id: string): Promise<DraftDetail> {
  * PATCH {title?, body?, labels?, version}: edit, only while status is "draft".
  * DELETE: remove, only while status is "draft".
  */
-export default withAuth(async (req, { user, forge }, context) => {
+export default withAuth(async (req, auth, context) => {
+  const { user } = auth;
   const id = requireUuid(context.params.id, "Draft");
 
   if (req.method === "GET") {
@@ -36,6 +38,7 @@ export default withAuth(async (req, { user, forge }, context) => {
     if (!state) throw new HttpError("not_found", "Draft not found.");
     const repo = await getRepoById(state.repoId);
     if (!repo) throw new HttpError("not_found", "The draft's repository is no longer tracked.");
+    const forge = await forgeForRepo(auth, repo);
     const known = new Set((await forge.listLabels(repo.owner, repo.name)).map((l) => l.name));
     const unknown = patch.labels.filter((l) => !known.has(l));
     if (unknown.length > 0) {

@@ -10,6 +10,7 @@ import {
   markDraftPosted,
   recordLinkFailed,
 } from "../../src/db/drafts";
+import { repoAndForge } from "../../src/forge/forRepo";
 import { apiError, json } from "../../src/http";
 import { hasValidJobSecret } from "../../src/jobs";
 import { postDraft } from "../../src/pipeline/post";
@@ -42,7 +43,10 @@ export default async (req: Request, context: Context) => {
   }
   const repoId = parsed.data.repo_id;
 
-  const handler = withAuth(async (_req, { user, forge }) => {
+  const handler = withAuth(async (_req, auth) => {
+    const { user } = auth;
+    // Gitea repos use the forwarded session token; GitHub repos load the triggering user's stored token.
+    const { forge } = await repoAndForge(auth, repoId);
     let posted = 0;
     let consecutiveFailures = 0;
 

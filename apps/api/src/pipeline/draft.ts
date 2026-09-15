@@ -82,8 +82,8 @@ export function describeFailure(err: unknown): string {
   const llmMessage = describeLlmError(err);
   if (llmMessage) return llmMessage;
   if (err instanceof ForgeError) {
-    if (err.status === 401) return "Gitea rejected the session token. Sign in again and retry.";
-    if (err.status === 403 || err.status === 404) return "The repository could not be read with your Gitea account.";
+    if (err.status === 401) return "The repository's host rejected your credentials. Sign in (or reconnect in Settings) and retry.";
+    if (err.status === 403 || err.status === 404) return "The repository could not be read with your account.";
     if (err.status === 413) return `The repository is too large to read (${err.message}).`;
     return `Reading the repository failed: ${err.message}.`;
   }
@@ -296,7 +296,7 @@ export async function readSnapshot(forge: ForgeClient, owner: string, repo: stri
     : null;
 
   const templates: IssueTemplate[] = [];
-  for (const path of findTemplatePaths(fullTree)) {
+  for (const path of findTemplatePaths(fullTree, forge.templateDirs)) {
     const parsed = parseTemplate(path, await forge.getRawFile(owner, repo, path, sha));
     if (parsed) templates.push(parsed);
   }

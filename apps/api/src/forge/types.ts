@@ -38,7 +38,8 @@ export interface ForgeLabel {
 export interface CreateIssueInput {
   title: string;
   body: string;
-  labelIds: number[];
+  /** Labels as the forge listed them; Gitea applies them by id, GitHub by name. */
+  labels: ForgeLabel[];
 }
 
 export interface CreatedIssue {
@@ -53,6 +54,10 @@ export interface ForgeIssue {
 }
 
 export interface ForgeClient {
+  /** "Gitea" or "GitHub", for messages a teammate reads. */
+  readonly label: string;
+  /** Directories this forge reads issue templates from, in its order of preference. */
+  readonly templateDirs: readonly string[];
   getCurrentUser(): Promise<ForgeUser>;
   isOrgMember(org: string, username: string): Promise<boolean>;
   listAccessibleRepos(query?: string): Promise<RepoRef[]>;

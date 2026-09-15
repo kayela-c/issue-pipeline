@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { draftEventSchema, draftStatusSchema } from "./enums.js";
+import { repoForgeSchema } from "./repos.js";
 
 const timestamp = z.iso.datetime({ offset: true });
 
@@ -16,7 +17,7 @@ export const draftSchema = z.object({
   id: z.uuid(),
   run_id: z.uuid().nullable(),
   repo_id: z.uuid(),
-  repo: z.object({ owner: z.string(), name: z.string() }),
+  repo: z.object({ forge: repoForgeSchema, owner: z.string(), name: z.string() }),
   title: z.string(),
   body: z.string(),
   template_name: z.string().nullable(),
@@ -27,6 +28,7 @@ export const draftSchema = z.object({
   depends_on: z.array(draftRefSchema),
   created_by: z.string(),
   approved_by: z.string().nullable(),
+  /** The posted issue's number and URL on the repo's forge (named for Gitea, which came first). */
   gitea_number: z.number().int().nullable(),
   gitea_url: z.string().nullable(),
   last_error: z.string().nullable(),

@@ -1,5 +1,6 @@
 import { linkHandler } from "../lib/router";
 import { AiSettings } from "./settings/AiSettings";
+import { Connections } from "./settings/Connections";
 import { Templates } from "./settings/Templates";
 
 const TABS = [
@@ -28,15 +29,7 @@ export function Settings({ pathname }: { pathname: string }) {
       </nav>
 
       {current === "/settings/ai" && <AiSettings />}
-      {current === "/settings/connections" && (
-        <section className="card">
-          <h2>Connections</h2>
-          <p className="muted">
-            Connecting GitHub, GitLab, and Bitbucket arrives in a later phase. You are signed in with Gitea, which is used for
-            every tracked repository today.
-          </p>
-        </section>
-      )}
+      {current === "/settings/connections" && <Connections />}
       {current === "/settings/templates" && <Templates />}
     </>
   );

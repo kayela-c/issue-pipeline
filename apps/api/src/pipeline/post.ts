@@ -1,6 +1,6 @@
 import type { DraftDetail } from "@issue-pipeline/shared";
 import type { ReconcileContext } from "../db/drafts";
-import { ForgeError, type ForgeClient } from "../forge/types";
+import { ForgeError, type ForgeClient, type ForgeLabel } from "../forge/types";
 import { HttpError } from "../http";
 
 /**
@@ -18,12 +18,12 @@ function buildIssueBody(draft: Pick<DraftDetail, "body" | "depends_on">, draftId
   return `${draft.body}${depLine}\n\n${marker(draftId)}`;
 }
 
-function describePostFailure(err: unknown): string {
+function describePostFailure(err: unknown, forge: Pick<ForgeClient, "label">): string {
   if (err instanceof ForgeError) {
-    if (err.status === 401) return "Gitea rejected the session token. Sign in again and retry.";
+    if (err.status === 401) return `${forge.label} rejected your credentials. Sign in (or reconnect in Settings) and retry.`;
     if (err.status === 403) return "You don't have permission to create issues in this repository.";
     if (err.status === 404) return "The repository could not be found.";
-    return `Posting to Gitea failed: ${err.message}.`;
+    return `Posting to ${forge.label} failed: ${err.message}.`;
   }
   return err instanceof Error ? err.message : String(err);
 }
@@ -87,15 +87,15 @@ export async function postDraft(draftId: string, actorId: string, forge: ForgeCl
   const detail = await store.getDraftDetail(draftId);
   if (!detail) throw new HttpError("not_found", "Draft not found.");
 
-  let labelIds: number[];
+  let labels: ForgeLabel[];
   let droppedLabels: string[];
   try {
-    const labels = await forge.listLabels(detail.repo.owner, detail.repo.name);
-    const byName = new Map(labels.map((l) => [l.name, l.id]));
-    labelIds = detail.labels.map((name) => byName.get(name)).filter((id): id is number => id !== undefined);
+    const known = await forge.listLabels(detail.repo.owner, detail.repo.name);
+    const byName = new Map(known.map((l) => [l.name, l]));
+    labels = detail.labels.map((name) => byName.get(name)).filter((l): l is ForgeLabel => l !== undefined);
     droppedLabels = detail.labels.filter((name) => !byName.has(name));
   } catch (err) {
-    const error = describePostFailure(err);
+    const error = describePostFailure(err, forge);
     await store.markDraftFailed({ id: draftId, actorId, error });
     return { status: "failed", error };
   }
@@ -105,13 +105,13 @@ export async function postDraft(draftId: string, actorId: string, forge: ForgeCl
     created = await forge.createIssue(detail.repo.owner, detail.repo.name, {
       title: detail.title,
       body: buildIssueBody(detail, draftId),
-      labelIds,
+      labels,
     });
   } catch (err) {
     if (err instanceof ForgeError && err.retryable) {
       return { status: "posting" };
     }
-    const error = describePostFailure(err);
+    const error = describePostFailure(err, forge);
     await store.markDraftFailed({ id: draftId, actorId, error });
     return { status: "failed", error };
   }
@@ -125,7 +125,7 @@ export async function postDraft(draftId: string, actorId: string, forge: ForgeCl
       await forge.addDependency(detail.repo.owner, detail.repo.name, created.number, dep.gitea_number);
       await store.markDependencyLinked(draftId, dep.id);
     } catch (err) {
-      await store.recordLinkFailed({ draftId, actorId, dependsOnId: dep.id, error: describePostFailure(err) });
+      await store.recordLinkFailed({ draftId, actorId, dependsOnId: dep.id, error: describePostFailure(err, forge) });
     }
   }
 
@@ -193,7 +193,7 @@ export async function reconcileDraft(draftId: string, actorId: string, forge: Fo
         await store.markDependencyLinked(draftId, dep.dependsOnId);
         linked++;
       } catch (err) {
-        await store.recordLinkFailed({ draftId, actorId, dependsOnId: dep.dependsOnId, error: describePostFailure(err) });
+        await store.recordLinkFailed({ draftId, actorId, dependsOnId: dep.dependsOnId, error: describePostFailure(err, forge) });
       }
     }
     const stillFailing = ctx.unlinkedDeps.length - linked;

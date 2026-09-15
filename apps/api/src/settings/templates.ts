@@ -5,8 +5,8 @@ import { TemplateNameTaken, type TemplateInput } from "../db/templates";
 import { HttpError, readJson } from "../http";
 import { checkTemplate } from "../pipeline/templates";
 
-/** The forge a tracked repo lives on. Every repo is on the sign-in Gitea until Phase 8 adds `repos.forge`. */
-export const repoForge = (_repo: Repo): Forge => "gitea";
+/** The forge a tracked repo lives on (`repos.forge`, Phase 9). */
+export const repoForge = (repo: Pick<Repo, "forge">): Forge => repo.forge as Forge;
 
 /** Parse a template request, answering 400 with the first readable problem (e.g. an unsupported format). */
 export async function readTemplateRequest<T>(req: Request, schema: z.ZodType<T>): Promise<T> {

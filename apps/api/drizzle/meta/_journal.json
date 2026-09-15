@@ -29,6 +29,27 @@
       "when": 1789423132996,
       "tag": "0003_issue_templates",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789434147567,
+      "tag": "0004_user_identities",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789503046666,
+      "tag": "0005_nullable_gitea",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789505004606,
+      "tag": "0006_github_repos",
+      "breakpoints": true
     }
   ]
 }

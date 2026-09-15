@@ -9,22 +9,34 @@ import { decrypt, encrypt, keyringFromEnvVars, type Keyring } from "../crypto/ae
 
 export const SESSION_COOKIE = "__Host-ip_session";
 export const OAUTH_COOKIE = "__Host-ip_oauth";
+export const GITHUB_OAUTH_COOKIE = "__Host-ip_github_oauth";
 
 /** Login-state cookie lifetime: long enough to sign in, short enough to go stale. */
 export const OAUTH_STATE_MAX_AGE_SECONDS = 600;
 
+/**
+ * Gitea fields are null for an account created by a non-Gitea sign-in that
+ * has not connected Gitea yet (decision 22) -- such a session cannot use any
+ * endpoint that needs Gitea (withAuth refuses those with `gitea_required`),
+ * but can still sign in, see /api/me, and connect Gitea.
+ */
 export const sessionSchema = z.object({
   uid: z.uuid(),
-  gitea_id: z.number().int(),
   username: z.string().min(1),
-  access_token: z.string().min(1),
-  refresh_token: z.string(),
+  gitea_id: z.number().int().nullable(),
+  access_token: z.string().min(1).nullable(),
+  refresh_token: z.string().nullable(),
   /** Unix seconds. */
-  access_expires_at: z.number().int(),
+  access_expires_at: z.number().int().nullable(),
   /** Unix seconds; the absolute session lifetime counts from here. */
   session_started_at: z.number().int(),
 });
 export type Session = z.infer<typeof sessionSchema>;
+
+/** A session with a working Gitea link -- the shape withAuth's Gitea calls need. */
+export type GiteaSession = Session & { gitea_id: number; access_token: string; refresh_token: string; access_expires_at: number };
+
+export const hasGitea = (session: Session): session is GiteaSession => session.gitea_id !== null;
 
 export const oauthStateSchema = z.object({
   state: z.string().min(1),
@@ -33,6 +45,18 @@ export const oauthStateSchema = z.object({
   created_at: z.number().int(),
 });
 export type OAuthState = z.infer<typeof oauthStateSchema>;
+
+/**
+ * GitHub is a confidential client (client_secret stays server-side on the
+ * token exchange), so this carries no PKCE verifier -- just enough to check
+ * the callback matches a login this server started.
+ */
+export const githubOauthStateSchema = z.object({
+  state: z.string().min(1),
+  return_to: z.string(),
+  created_at: z.number().int(),
+});
+export type GithubOAuthState = z.infer<typeof githubOauthStateSchema>;
 
 export type { Keyring };
 

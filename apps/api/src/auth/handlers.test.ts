@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { User } from "../db/users";
 import { fakeForge } from "../forge/fake";
 import type { ForgeClient } from "../forge/types";
+import { GiteaLinkedElsewhere } from "../db/users";
 import { handleCallback, handleLogin, handleLogout, type LoginDeps } from "./handlers";
 import { codeChallenge, type TokenResult } from "./oauth";
 import {
@@ -14,6 +15,7 @@ import {
   unseal,
   type Keyring,
   type OAuthState,
+  type Session,
 } from "./session";
 
 const NOW = 1_800_000_000;
@@ -29,7 +31,7 @@ const user: User = {
   lastSeenAt: new Date(),
 };
 
-function makeDeps(opts: { member?: boolean; exchange?: TokenResult } = {}) {
+function makeDeps(opts: { member?: boolean; exchange?: TokenResult; linkError?: unknown } = {}) {
   return {
     createForge: (): ForgeClient =>
       fakeForge({
@@ -46,6 +48,10 @@ function makeDeps(opts: { member?: boolean; exchange?: TokenResult } = {}) {
     exchange: vi.fn(async () =>
       opts.exchange ?? { ok: true as const, token: { access_token: "access", refresh_token: "refresh", expires_in: 3600 } },
     ),
+    linkGitea: vi.fn(async () => {
+      if (opts.linkError) throw opts.linkError;
+      return user;
+    }),
   } satisfies LoginDeps;
 }
 
@@ -58,11 +64,22 @@ const cookieValue = (res: Response, name: string) =>
 
 const pending: OAuthState = { state: "state-123", code_verifier: "v".repeat(43), return_to: "/board", created_at: NOW - 30 };
 
-function callback(query: string, state: OAuthState | null = pending) {
-  const headers: Record<string, string> = {};
-  if (state) headers.cookie = `${OAUTH_COOKIE}=${seal(OAUTH_COOKIE, state, keys)}`;
-  return new Request(`${ORIGIN}/api/auth/callback?${query}`, { headers });
+function callback(query: string, state: OAuthState | null = pending, session?: Session) {
+  const cookies: string[] = [];
+  if (state) cookies.push(`${OAUTH_COOKIE}=${seal(OAUTH_COOKIE, state, keys)}`);
+  if (session) cookies.push(`${SESSION_COOKIE}=${seal(SESSION_COOKIE, session, keys)}`);
+  return new Request(`${ORIGIN}/api/auth/callback?${query}`, { headers: { cookie: cookies.join("; ") } });
 }
+
+const giteaLessSession: Session = {
+  uid: "00000000-0000-4000-8000-000000000002",
+  username: "kayela-c",
+  gitea_id: null,
+  access_token: null,
+  refresh_token: null,
+  access_expires_at: null,
+  session_started_at: NOW - 10,
+};
 
 describe("handleLogin", () => {
   it("redirects to Gitea with PKCE and stores the verifier in an encrypted cookie", () => {
@@ -137,6 +154,39 @@ describe("handleCallback", () => {
     const deps = makeDeps({ exchange: { ok: false, kind: "rejected", message: "invalid client secret" } });
     const res = await handleCallback(callback("code=abc&state=state-123"), deps);
     expect(res.headers.get("location")).toBe("/login?error=failed");
+  });
+
+  it("links Gitea to a signed-in, Gitea-less account instead of creating a second one", async () => {
+    const deps = makeDeps();
+    const res = await handleCallback(callback("code=abc&state=state-123", pending, giteaLessSession), deps);
+
+    expect(res.headers.get("location")).toBe("/board");
+    expect(deps.linkGitea).toHaveBeenCalledWith(giteaLessSession.uid, { id: 7, username: "kayela" });
+    expect(deps.upsertUser).not.toHaveBeenCalled();
+    const session = unseal(SESSION_COOKIE, cookieValue(res, SESSION_COOKIE), keys, sessionSchema);
+    expect(session).toMatchObject({ uid: user.id, gitea_id: 7, access_token: "access" });
+  });
+
+  it("still re-checks org membership when linking Gitea to a signed-in account", async () => {
+    const deps = makeDeps({ member: false });
+    const res = await handleCallback(callback("code=abc&state=state-123", pending, giteaLessSession), deps);
+    expect(res.headers.get("location")).toBe("/login?error=not_member");
+    expect(deps.linkGitea).not.toHaveBeenCalled();
+  });
+
+  it("reports a Gitea account already linked to a different sign-in", async () => {
+    const deps = makeDeps({ linkError: new GiteaLinkedElsewhere() });
+    const res = await handleCallback(callback("code=abc&state=state-123", pending, giteaLessSession), deps);
+    expect(res.headers.get("location")).toBe("/login?error=gitea_already_linked");
+  });
+
+  it("does not treat an already-Gitea-linked session as link mode", async () => {
+    const linkedSession: Session = { ...giteaLessSession, gitea_id: 99, access_token: "old", refresh_token: "old-r", access_expires_at: NOW + 100 };
+    const deps = makeDeps();
+    const res = await handleCallback(callback("code=abc&state=state-123", pending, linkedSession), deps);
+    expect(deps.linkGitea).not.toHaveBeenCalled();
+    expect(deps.upsertUser).toHaveBeenCalled();
+    expect(res.headers.get("location")).toBe("/board");
   });
 });
 
