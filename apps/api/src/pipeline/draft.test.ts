@@ -7,6 +7,7 @@ import { fakeForge } from "../forge/fake";
 import { ForgeError } from "../forge/types";
 import type { DraftConversation, LlmClient } from "../llm";
 import { MAX_JOB_ATTEMPTS, TransientJobError, fetchContext, runDraftJob, type DraftJobStore } from "./draft";
+import { appTemplateFile, checkTemplate } from "./templates";
 import type { DraftOutput } from "./validate";
 
 const RUN_ID = "00000000-0000-4000-8000-0000000000aa";
@@ -317,6 +318,49 @@ describe("app templates", () => {
     expect(templates).toContain("Template file: bug-report.md");
     expect(templates).not.toContain("repo-task.md");
     expect(committed[0]!.drafts[0]).toMatchObject({ template_name: "bug-report.md", labels: ["backend"] });
+  });
+
+  it("drafts and validates against a YAML issue form made in Settings", async () => {
+    const content = [
+      "name: Bug report",
+      "labels: [backend]",
+      "body:",
+      "  - type: textarea",
+      "    id: steps",
+      "    attributes: { label: Steps to reproduce }",
+      "    validations: { required: true }",
+      "  - type: dropdown",
+      "    id: severity",
+      "    attributes: { label: Severity, options: [Low, High] }",
+      "    validations: { required: true }",
+    ].join("\n");
+    expect(checkTemplate("form", content, { name: "Bug report", forges: ["gitea"] }).errors).toEqual([]);
+    const formSnapshot = { ...snapshot, kind: "form" as const, file: appTemplateFile("Bug report", "form"), content };
+
+    const formDraft = (body: string): DraftOutput => ({
+      drafts: [{ key: "a", title: "Crash", body, template_name: "bug-report.yml", labels: [], depends_on: [] }],
+      reviewer_notes: null,
+    });
+    const missingSeverity = formDraft("### Steps to reproduce\n\n1. Open\n");
+    const valid = formDraft("### Steps to reproduce\n\n1. Open\n\n### Severity\n\nHigh\n");
+
+    const { store, run, committed } = memoryStore({ templateSnapshot: formSnapshot });
+    let templates = "";
+    let repairErrors: string[] = [];
+    const client = llm([missingSeverity, valid], { onDraft: (input) => (templates = input.templates) });
+    const draftIssues = client.draftIssues.bind(client);
+    client.draftIssues = async (input) => {
+      const conversation = await draftIssues(input);
+      return { ...conversation, repair: (errors) => ((repairErrors = errors), conversation.repair(errors)) };
+    };
+
+    await runDraftJob(RUN_ID, { store, forge: repoWithTemplate(), llm: client, models });
+
+    expect(templates).toContain("Kind: issue form");
+    expect(templates).toContain('exactly one of these options, copied exactly: "Low", "High"');
+    expect(repairErrors.join(" ")).toMatch(/missing the "### Severity" section required by bug-report.yml/);
+    expect(run.status).toBe("done");
+    expect(committed[0]!.drafts[0]).toMatchObject({ template_name: "bug-report.yml", labels: ["backend"] });
   });
 
   it("rejects drafts that pick the repository's template while an app template is in use", async () => {
