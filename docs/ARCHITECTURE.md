@@ -777,7 +777,7 @@ Phases 6-11 add a **Settings** tab (decision 21). Settings are built and tested 
 - Deviations from the plan: the Test endpoint is not rate-limited yet (each click makes up to two small model calls on the caller's own key or the team's; rate limits are Phase 12 work). A retry uses the settings of whoever retries, since the job runs as the triggering user.
 - **Accept:** a user with their own key for a new provider runs drafting and `runs.model_draft` names that provider; a user with no settings still uses the env provider; no key appears in any API response or log line.
 
-### Phase 7 -- Issue templates in Settings -- BUILT, awaiting acceptance
+### Phase 7 -- Issue templates in Settings -- DONE (`b59cb16`, accepted 2026-09-16)
 - `issue_templates` (team-wide; forges it applies to; Markdown or YAML form; raw content), CRUD with optimistic `version`, server-side preview through `pipeline/templates.ts`.
 - Format options by forge: Gitea and GitHub offer Markdown or a YAML issue form; GitLab and Bitbucket offer Markdown only.
 - New issue modal picks "Repo's templates" (default) or an app template; the run snapshots the app template it used.
