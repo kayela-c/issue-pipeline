@@ -751,16 +751,16 @@ Each phase ends with its acceptance criteria passing and a short summary back to
 - Added during the phase: env-selected AI provider (Gemini, Anthropic, LM Studio), `ROUTING.md` convention and migration `0001`, prompt budgeting, dropdown snapping, the Queue page with runs expanding in place.
 - **Accepted 2026-09-13:** a real run on `TrueRoster/frontend` produced a valid draft following `feature-task.yml` with `gemini/gemini-3.8-flash`. Snapshot reuse, forced AI failure, and retry-without-duplicates are covered by unit tests and the live database test (`netlify dev` does not replay background retries).
 
-### Phase 3 -- Review UI -- BUILT, awaiting acceptance (uncommitted)
+### Phase 3 -- Review UI -- DONE (accepted 2026-09-16)
 - Board, draft editor, label and dependency pickers, approve/unapprove, delete, event history, optimistic concurrency with guarded writes, `react-markdown` preview.
 - **Accept:** two browser sessions editing the same draft -> the second gets "Edited by someone else" (409); a cyclic dependency is rejected; approved drafts are read-only until unapproved; Markdown preview does not execute HTML from draft bodies (covered by a unit test).
 
-### Phase 4 -- Posting -- BUILT, awaiting acceptance (uncommitted)
+### Phase 4 -- Posting -- DONE (accepted 2026-09-16)
 - `createIssue` / `addDependency` / `listIssuesCreatedBySince` on the forge (single-attempt `createIssue`, so a timeout or 5xx cannot cause a silent double-post), `postDraft` and `reconcileDraft` (`pipeline/post.ts`, injected-store pattern like `pipeline/draft.ts`), the atomic claim and its guarded-write siblings in `db/drafts.ts`, `post-queue-background`, and editor/board actions (Post, Retry, Reconcile, "Post all ready").
 - Covered by unit tests against fakes (`pipeline/post.test.ts`) and, for the raw SQL itself, by live tests against the Neon dev branch (`db/runs.live.test.ts`, "posting").
 - **Accept (not yet run against a live Gitea):** the posted issue appears in Gitea authored by the posting user with the hidden marker; dependencies post first and are linked; posting a blocked draft returns 409 naming the unposted dependencies; the failure-injection test (Section 11, still not built -- needs the Docker Gitea integration environment) yields exactly one issue after reconcile.
 
-### Phase 5 -- Production deployment -- PARTIALLY DONE
+### Phase 5 -- Production deployment -- DONE (accepted 2026-09-16)
 - **Done (2026-09-14):** `netlify.toml` build config; Neon `main` database branch migrated (it is the project's default/primary branch and had never been migrated -- the Neon `dev` branch was branched off it before any schema existed); `scripts/smoke_test.py`; production Netlify site created at `https://issue-pipeline.netlify.app` (project id in `.env` as `NETLIFY_PROJECT_ID`, set up by Kayela); SPA and `/api` routing confirmed in production. Git layout is `main` = production, `dev` = ongoing work (decision 20).
 - **Blocked (2026-09-14): production sign-in.** The production redirect URI is registered, but Cloudflare in front of `git.konceptkit.com` answers Netlify Functions' server-side requests with 403 (non-JSON body), so the OAuth code exchange fails (`error=failed`, log "Gitea returned 403"). Requests from a developer machine pass, which is why `netlify dev` never showed it. Every server-side Gitea call from Netlify is affected, not only OAuth. Netlify Functions have no static IPs, so the fix is a Cloudflare-side rule: find the blocking rule under Security > Events; Bot Fight Mode on the free plan cannot be bypassed by WAF rules and may need to be switched off.
 - **Outstanding, owned by Kayela:** the Cloudflare rule above; confirm production environment variables on the Netlify site (Section 9 item 4); re-add `http://localhost:8888/api/auth/callback` to the Gitea OAuth app (it was removed when the production URI was added).
@@ -768,7 +768,7 @@ Each phase ends with its acceptance criteria passing and a short summary back to
 
 Phases 6-11 add a **Settings** tab (decision 21). Settings are built and tested under `netlify dev` while production sign-in is blocked (Phase 5).
 
-### Phase 6 -- Settings shell and per-user AI settings -- BUILT, awaiting acceptance (`16cfdf2`)
+### Phase 6 -- Settings shell and per-user AI settings -- DONE (`16cfdf2`, accepted 2026-09-16)
 - `CREDENTIALS_KEY` and encrypted credential columns (AES-256-GCM, AAD `"<table>:<column>:<user id>"`, previous key accepted during rotation), sharing its cipher core with the session cookie.
 - Providers: Anthropic, Gemini, and an OpenAI-compatible REST client for OpenAI, xAI Grok, and Venice (fixed base URLs, `response_format: json_schema`). LM Studio stays env-only and dev-only.
 - `user_ai_settings` table. The client for a run is resolved for the user who triggered it: their provider with their own key -> their provider with the team's env key -> the env provider (today's behaviour) -> an error telling them to add a key.
