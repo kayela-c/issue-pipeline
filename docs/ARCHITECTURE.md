@@ -5,6 +5,48 @@
 > Revision history:
 > - 2026-09-12: the client became a **web app** (React SPA on the Netlify site), replacing the original Tauri desktop app.
 > - 2026-09-13: AI provider selectable by env var (Anthropic, Gemini, LM Studio for local dev); `ROUTING.md` convention; workflow Queue; Phase 3 review UI. Status of every phase is in Section 12.
+> - 2026-09-16: Phases 0-8 accepted; LM Studio added as a Settings provider (decision 24); "Current status and handoff" section added so work can resume on another computer.
+
+## Current status and handoff (2026-09-16) -- read this first
+
+Work is moving to a different computer. This section is the resume point; Section 12 has the detail for each phase.
+
+### Where things stand
+- **Phases 0-8: DONE** (accepted by Kayela 2026-09-16).
+- **Phase 9 (GitHub repositories): BUILT, awaiting acceptance.** Kayela tracked a GitHub repo and drafting started, but her hosted AI provider's key failed, so she is switching to a local LM Studio model to finish testing.
+- **LM Studio in Settings: BUILT and committed (`d887634`), not yet tried live.** Added mid-Phase 9 (decision 24, Phase 6 follow-up). Migration `0007` is applied to the Neon `dev` branch.
+- **Phases 10-12: not started.**
+- **Git:** all work is on `dev` (last commit before this section: `03cfe37`), pushed to `origin/dev`. Working tree clean.
+
+### Next steps, in order
+1. Set up the new computer (below).
+2. Settings > AI model > **LM Studio**: server URL, API token (only if "Require Authentication" is on), select and draft models, and the context length the model is loaded with. Save, then **Test** until it passes. Settings are stored per user in the Neon `dev` database, so anything already saved there carries over -- but change the server URL if LM Studio now runs somewhere else.
+3. Run the **Phase 9 acceptance** list (Section 12, Phase 9): reconnect GitHub with repo access; track a private GitHub repo; draft from it (its `.github/ISSUE_TEMPLATE` form drives validation); approve and post (issue on GitHub authored by you, dependencies linked); reconcile a stuck post; a teammate without GitHub gets the connect message.
+4. When Phase 9 passes, mark it DONE in Section 12 and start Phase 10 (GitLab).
+
+### Production policy (Kayela, 2026-09-16)
+**Do not update git `main` or production until every phase is complete.** Commit and push to `dev` only. Production (`main`, Netlify site `issue-pipeline.netlify.app`) is currently at `d68f21e` (Phase 7). Release checklist for the end:
+- Apply the pending migrations to the Neon `main` database branch (it has `0000`-`0003`; `0004`-`0007` and anything later are still to run).
+- Netlify env vars: `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `GITHUB_ALLOWED_USERS` (plus whatever Phases 10-12 add).
+- Register the production callback `https://issue-pipeline.netlify.app/api/auth/github/callback` on the GitHub OAuth App.
+- Fast-forward `main` to `dev` and push.
+
+### Setting up a new computer
+1. Install Node 20+ (24 used so far), pnpm 10.1.0 (`corepack enable` picks it up from `packageManager`), Git, and Python 3 (for `scripts/`).
+2. `git clone` the repo, `git checkout dev`, `pnpm install`.
+3. **Copy `.env` from the old computer** through a private channel (password manager, USB drive) -- it is gitignored and holds every secret. Do not regenerate these values: a different `CREDENTIALS_KEY` makes every key already saved in Settings unreadable (users would have to re-enter them), and a different `SESSION_SECRET` signs everyone out. `.env.example` lists every variable.
+4. `npx netlify login`, then `npx netlify link` to the `issue-pipeline` site (its id is `NETLIFY_PROJECT_ID` in `.env`). This is only needed for the Netlify CLI; `netlify dev` reads `.env` itself.
+5. `pnpm dev` (builds `packages/shared`, then `netlify dev` on `http://localhost:8888`). Use exactly that origin: the Gitea and GitHub OAuth apps have `http://localhost:8888/api/auth/callback` and `http://localhost:8888/api/auth/github/callback` registered. If port 8888 is taken, stop the old `netlify dev` instead of using another port.
+6. Check: `pnpm typecheck` and `pnpm test` pass (223 API unit tests and 7 web tests as of `d887634`).
+7. Install LM Studio 0.4.1+, load a model, and start its server (Developer tab).
+
+### Working notes for Claude Code
+- `.env` has `DATABASE_URL` (Neon `dev`, host `ep-small-unit-...`) and `DATABASE_URL_MAIN` (Neon `main` = production, host `ep-shy-art-...`). `drizzle.config.ts` reads only `DATABASE_URL` from the environment, so pass it explicitly. Kayela runs migrations herself from the `!` prompt (bash); the agent's permission checks have blocked `pnpm db:migrate` against both branches. Dev: `DATABASE_URL="$(grep '^DATABASE_URL=' .env | cut -d= -f2- | tr -d '\r"')" pnpm db:migrate`. Production (release only): the same with `DATABASE_URL_MAIN`.
+- Give Kayela exact copy-paste commands, never templates with placeholders.
+- Build one phase at a time, stop with a summary, and commit or push only when Kayela says so.
+- Claude Code's own memory lives on the old computer and does not travel; everything it knew that matters is in this section and Section 13.
+
+---
 
 ## 0. Instructions for Claude Code
 
@@ -682,7 +724,7 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 2. **Environments:** production uses the Neon project's `main` branch (its default/primary database branch); local dev (`netlify dev`) uses the Neon `dev` branch. **These are Neon database branches, unrelated to the git `main`/`dev` branches in item 1** -- both happen to use the same two names, which is a coincidence worth double-checking against whenever an instruction just says "main" or "dev." Migrations are applied with `pnpm db:migrate` before a deploy that needs them. **Done (2026-09-14):** the Neon `main` branch had zero tables (only the Neon `dev` branch had ever been migrated); `pnpm db:migrate` was run against it and all 8 tables plus `drizzle.__drizzle_migrations` now exist.
 3. **Gitea OAuth app:** confidential client with redirect URIs `https://issue-pipeline.netlify.app/api/auth/callback` and `http://localhost:8888/api/auth/callback`. **Site created (2026-09-14); redirect URI registration still outstanding** -- an admin needs to add the production URI in Gitea now that it's known.
 4. **Secrets** (`GITEA_OAUTH_CLIENT_SECRET`, `SESSION_SECRET`, `GOOGLE_API_KEY` / `ANTHROPIC_API_KEY`, `DATABASE_URL`, `INTERNAL_JOB_SECRET`) live only in Netlify environment variables and the local, gitignored `.env`. Use different `SESSION_SECRET` values per environment. **Netlify site created** (`issue-pipeline.netlify.app`, project id in `.env` as `NETLIFY_PROJECT_ID`, set up by Kayela); **env vars not yet confirmed set**.
-5. **AI provider:** the team default `LLM_PROVIDER` may be any provider except `lmstudio`, which refuses to run outside `netlify dev`. `CREDENTIALS_KEY` (different per environment) must be set before anyone saves a key in Settings -- set locally and on Netlify, and migration `0002` applied to the Neon `main` branch (2026-09-14).
+5. **AI provider:** the team default `LLM_PROVIDER` may be any provider except `lmstudio`, which refuses to run outside `netlify dev` (and is hidden from Settings when deployed, decision 24). `CREDENTIALS_KEY` (different per environment) must be set before anyone saves a key in Settings -- set locally and on Netlify, and migration `0002` applied to the Neon `main` branch (2026-09-14).
 6. **Key rotation:** set the new key as `SESSION_SECRET` and the old one as `SESSION_SECRET_PREVIOUS`; remove the old key after `SESSION_MAX_AGE_DAYS`.
 7. **Deploy previews** build and serve the UI and `/api/health`, but sign-in is unsupported there (their URLs are not registered redirect URIs).
 8. **Smoke test:** `scripts/smoke_test.py` (Python, `requests`) runs the full path -- track a repo, submit notes, wait for drafting, approve, post -- against a deployed site using a bearer PAT (`pip install -r scripts/requirements.txt`, then see the script's docstring for usage). **Built, not yet run** -- needs the OAuth redirect URI and env vars in place first: `python scripts/smoke_test.py --base-url https://issue-pipeline.netlify.app --token <PAT> --owner <org> --repo <repo>`.
@@ -700,7 +742,7 @@ TypeScript + Vite + React + TanStack Query + `react-markdown`. Types and zod sch
 - [ ] `/internal/*` requires `INTERNAL_JOB_SECRET` (constant-time compare).
 - [ ] Nothing posts to Gitea without an `approved` status set by a human, and approval applies only to the version the approver reviewed.
 - [ ] AI output sanitized (marker stripping, label whitelist, length limits) and Markdown rendered without raw HTML.
-- [ ] AI provider keys server-side only. Keys saved in Settings are AES-256-GCM ciphertext bound to column, user, and provider; the API returns only `has_key` and the last 4 characters; provider base URLs are fixed, never user-supplied.
+- [ ] AI provider keys server-side only. Keys saved in Settings are AES-256-GCM ciphertext bound to column, user, and provider; the API returns only `has_key` and the last 4 characters; hosted provider base URLs are fixed, never user-supplied; the one user-supplied URL (LM Studio's) is accepted and used only when the server runs locally, never when deployed (decision 24).
 - [ ] Per-user daily run cap enforced from the `runs` table.
 - [ ] Input size limits enforced by zod on every endpoint (request bodies capped at 64 KB).
 - [ ] No CORS headers anywhere; security headers (CSP, `frame-ancestors 'none'`, `nosniff`, referrer policy) set.
