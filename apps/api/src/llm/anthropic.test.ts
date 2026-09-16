@@ -117,7 +117,7 @@ describe("describeLlmError", () => {
     };
     const err = new Anthropic.APIError(undefined, body, JSON.stringify(body), undefined);
     expect(describeLlmError(err)).toBe(
-      "The prompt (17784 tokens) is larger than the model context window (8192 tokens). Load the model with a larger context length, and set LMSTUDIO_CONTEXT_TOKENS to match.",
+      "The prompt (17784 tokens) is larger than the model context window (8192 tokens). Load the model with a larger context length, and set the same context length for LM Studio in Settings.",
     );
   });
 

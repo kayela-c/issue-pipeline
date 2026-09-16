@@ -11,6 +11,10 @@ const ENV_NAMES = [
   "OPENAI_MODEL_DRAFT",
   "XAI_API_KEY",
   "VENICE_API_KEY",
+  "LMSTUDIO_API_KEY",
+  "LMSTUDIO_BASE_URL",
+  "LMSTUDIO_CONTEXT_TOKENS",
+  "CONTEXT",
 ];
 
 beforeEach(() => {
@@ -57,6 +61,39 @@ describe("resolveLlmConfig", () => {
   it("asks for a key when neither the user nor the team has one", () => {
     expect(() => resolveLlmConfig({ provider: "grok", modelSelect: "a", modelDraft: "b" })).toThrow(AiSettingsError);
     expect(() => resolveLlmConfig({ provider: "grok", modelSelect: "a", modelDraft: "b" })).toThrow(/API key for Grok/);
+  });
+
+  it("uses LM Studio without a key, with the user's server URL and context length over the env's", () => {
+    vi.stubEnv("LMSTUDIO_BASE_URL", "http://localhost:1234");
+    vi.stubEnv("LMSTUDIO_CONTEXT_TOKENS", "8192");
+    expect(
+      resolveLlmConfig({
+        provider: "lmstudio",
+        modelSelect: "small",
+        modelDraft: "big",
+        baseUrl: "http://192.168.1.20:1234",
+        contextTokens: 32768,
+      }),
+    ).toEqual({
+      provider: "lmstudio",
+      apiKey: "",
+      modelSelect: "small",
+      modelDraft: "big",
+      keySource: "team",
+      baseUrl: "http://192.168.1.20:1234",
+      contextTokens: 32768,
+    });
+    expect(resolveLlmConfig({ provider: "lmstudio", modelSelect: "s", modelDraft: "b", apiKey: "lm-token" })).toMatchObject({
+      apiKey: "lm-token",
+      keySource: "user",
+      baseUrl: "http://localhost:1234",
+      contextTokens: 8192,
+    });
+  });
+
+  it("refuses LM Studio on a deployed server", () => {
+    vi.stubEnv("CONTEXT", "production");
+    expect(() => resolveLlmConfig({ provider: "lmstudio", modelSelect: "s", modelDraft: "b" })).toThrow(/only works when the app runs locally/);
   });
 
   it("asks for models when a provider has no default", () => {

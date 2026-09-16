@@ -42,7 +42,7 @@ export function describeAnthropicError(err: unknown): string | undefined {
     try {
       const inner = JSON.parse(nested[0]) as { error?: { message?: string; n_prompt_tokens?: number; n_ctx?: number } };
       if (inner.error?.n_prompt_tokens && inner.error.n_ctx) {
-        return `The prompt (${inner.error.n_prompt_tokens} tokens) is larger than the model context window (${inner.error.n_ctx} tokens). Load the model with a larger context length, and set LMSTUDIO_CONTEXT_TOKENS to match.`;
+        return `The prompt (${inner.error.n_prompt_tokens} tokens) is larger than the model context window (${inner.error.n_ctx} tokens). Load the model with a larger context length, and set the same context length for LM Studio in Settings.`;
       }
       if (inner.error?.message) detail = inner.error.message;
     } catch {

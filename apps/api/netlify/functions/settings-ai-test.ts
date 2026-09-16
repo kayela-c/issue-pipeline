@@ -38,6 +38,8 @@ export default withAuth(async (_req, { user }, context) => {
       modelSelect,
       modelDraft,
       apiKey: userApiKey(user.id, settings, provider),
+      baseUrl: row?.baseUrl,
+      contextTokens: row?.contextTokens,
     });
     apiKey = config.apiKey;
     modelSelect = config.modelSelect;
@@ -47,7 +49,7 @@ export default withAuth(async (_req, { user }, context) => {
     if (config.modelDraft !== config.modelSelect) {
       await createLlmClient({ ...config, modelSelect: config.modelDraft }).selectFiles(PROBE);
     }
-    const whose = config.keySource === "user" ? "your key" : "the team key";
+    const whose = !config.apiKey ? "no key" : config.keySource === "user" ? "your key" : "the team key";
     return result(true, `Both models answered with structured output using ${whose}.`);
   } catch (err) {
     if (err instanceof AiSettingsError) return result(false, err.message);

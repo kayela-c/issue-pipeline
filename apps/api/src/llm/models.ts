@@ -1,11 +1,13 @@
 import type { AiModel, AiProvider } from "@issue-pipeline/shared";
 import { z } from "zod";
+import { lmStudioRoot } from "./index";
 import { OPENAI_COMPATIBLE_PROVIDERS } from "./openai";
 
 /**
  * Live model lists for the Settings model pickers, fetched with the user's
- * (or the team's) key. Each provider's list endpoint is fixed; nothing here
- * takes a URL from the request.
+ * (or the team's) key. Each hosted provider's list endpoint is fixed. LM
+ * Studio's is the URL the user saved in Settings, which is only used while the
+ * server runs locally (requireAiProvider refuses it when deployed).
  */
 
 type FetchLike = typeof fetch;
@@ -80,7 +82,11 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   return parsed.data;
 }
 
-export async function listProviderModels(provider: AiProvider, apiKey: string, fetchImpl: FetchLike = fetch): Promise<AiModel[]> {
+export async function listProviderModels(
+  provider: AiProvider,
+  apiKey: string,
+  { baseUrl, fetchImpl = fetch }: { baseUrl?: string; fetchImpl?: FetchLike } = {},
+): Promise<AiModel[]> {
   let models: AiModel[];
   switch (provider) {
     case "anthropic": {
@@ -113,6 +119,15 @@ export async function listProviderModels(provider: AiProvider, apiKey: string, f
         .data.filter((m) => !(provider === "openai" && OPENAI_NON_CHAT.test(m.id)))
         .filter((m) => m.model_spec?.capabilities?.supportsResponseSchema !== false)
         .map((m) => ({ id: m.id, name: m.model_spec?.name ?? null }));
+      break;
+    }
+    case "lmstudio": {
+      // LM Studio's OpenAI-compatible list; embedding models cannot draft.
+      const root = lmStudioRoot(baseUrl ?? "http://localhost:1234");
+      const body = await getJson(`${root}/v1/models`, apiKey ? { authorization: `Bearer ${apiKey}` } : {}, fetchImpl);
+      models = parse(openAiList, body)
+        .data.filter((m) => !/embed/i.test(m.id))
+        .map((m) => ({ id: m.id, name: null }));
       break;
     }
   }

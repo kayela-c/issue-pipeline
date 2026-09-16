@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { AI_PROVIDER_LABELS, type AiProvider } from "@issue-pipeline/shared";
+import { AI_PROVIDERS, AI_PROVIDER_LABELS, LOCAL_AI_PROVIDERS, type AiProvider } from "@issue-pipeline/shared";
 import { createAnthropicClient, describeAnthropicError, isRetryableAnthropicError } from "./anthropic";
 import { createGeminiClient, describeGeminiError, isRetryableGeminiError } from "./gemini";
 import {
@@ -23,15 +23,19 @@ export * from "./types";
  *   LLM_PROVIDER=openai     OPENAI_API_KEY, OPENAI_MODEL_SELECT, OPENAI_MODEL_DRAFT
  *   LLM_PROVIDER=grok       XAI_API_KEY, XAI_MODEL_SELECT, XAI_MODEL_DRAFT
  *   LLM_PROVIDER=venice     VENICE_API_KEY, VENICE_MODEL_SELECT, VENICE_MODEL_DRAFT
- *   LLM_PROVIDER=lmstudio   LMSTUDIO_BASE_URL, LMSTUDIO_MODEL_SELECT, LMSTUDIO_MODEL_DRAFT,
- *                           LMSTUDIO_CONTEXT_TOKENS   (local development only; never a user choice)
+ *   LLM_PROVIDER=lmstudio   LMSTUDIO_BASE_URL, LMSTUDIO_API_KEY, LMSTUDIO_MODEL_SELECT, LMSTUDIO_MODEL_DRAFT,
+ *                           LMSTUDIO_CONTEXT_TOKENS
+ *
+ * LM Studio runs on the user's machine, so it is only usable while the server
+ * runs locally too (`netlify dev`); see lmStudioAvailable(). Its URL, token,
+ * and context length can be set in Settings like any other provider's key.
  *
  * A provider's env key and models also serve as the fallback for users who
  * pick that provider without adding their own. LLM_MAX_OUTPUT_TOKENS
  * optionally caps the drafting output for any provider.
  */
-export const LLM_PROVIDERS = ["anthropic", "gemini", "grok", "openai", "venice", "lmstudio"] as const;
-export type LlmProvider = (typeof LLM_PROVIDERS)[number];
+export const LLM_PROVIDERS = AI_PROVIDERS;
+export type LlmProvider = AiProvider;
 
 const ENV: Record<LlmProvider, { prefix: string; key?: string }> = {
   anthropic: { prefix: "ANTHROPIC", key: "ANTHROPIC_API_KEY" },
@@ -39,7 +43,8 @@ const ENV: Record<LlmProvider, { prefix: string; key?: string }> = {
   grok: { prefix: "XAI", key: "XAI_API_KEY" },
   openai: { prefix: "OPENAI", key: "OPENAI_API_KEY" },
   venice: { prefix: "VENICE", key: "VENICE_API_KEY" },
-  lmstudio: { prefix: "LMSTUDIO" },
+  // Only needed when LM Studio's "Require Authentication" is on.
+  lmstudio: { prefix: "LMSTUDIO", key: "LMSTUDIO_API_KEY" },
 };
 
 /**
@@ -56,7 +61,25 @@ const DEFAULT_MODELS: Record<LlmProvider, { select: string; draft: string }> = {
   lmstudio: { select: "", draft: "" },
 };
 
-const label = (provider: LlmProvider) => (provider === "lmstudio" ? "LM Studio" : AI_PROVIDER_LABELS[provider]);
+const label = (provider: LlmProvider) => AI_PROVIDER_LABELS[provider];
+
+const isLocalProvider = (provider: LlmProvider) => LOCAL_AI_PROVIDERS.includes(provider);
+
+/**
+ * Whether local providers can be used: only when this server is not deployed.
+ * Deployed functions cannot reach a model on someone's machine, and a
+ * user-supplied URL fetched from production would be a request-forgery hole.
+ * Netlify sets CONTEXT to "dev" under `netlify dev`; tests leave it unset.
+ */
+export const localProvidersAvailable = () => !process.env.CONTEXT || process.env.CONTEXT === "dev";
+
+/** LM Studio's server URL and model context length from env, else LM Studio's defaults. */
+export function teamLocalSettings(): { baseUrl: string; contextTokens: number } {
+  return {
+    baseUrl: process.env.LMSTUDIO_BASE_URL || "http://localhost:1234",
+    contextTokens: positiveIntFromEnv("LMSTUDIO_CONTEXT_TOKENS") ?? 8_192,
+  };
+}
 
 /**
  * A setup problem the user (or an admin) must fix; retrying will not help.
@@ -95,12 +118,15 @@ export function teamModels(provider: LlmProvider): { select: string | null; draf
 /** Everything needed to build a client. */
 export interface LlmConfig {
   provider: LlmProvider;
-  /** Unused by LM Studio, which reads its own env vars. */
+  /** Empty for LM Studio without authentication. */
   apiKey: string;
   modelSelect: string;
   modelDraft: string;
   /** Where the key came from, for messages. */
   keySource: "user" | "team";
+  /** Local providers only. */
+  baseUrl?: string;
+  contextTokens?: number;
 }
 
 /** "provider/model" ids, as recorded on each run. */
@@ -116,6 +142,9 @@ export interface UserAiChoice {
   modelDraft: string | null;
   /** The user's own decrypted key for that provider. */
   apiKey?: string;
+  /** Local providers only; null or undefined means the env/default value. */
+  baseUrl?: string | null;
+  contextTokens?: number | null;
 }
 
 /**
@@ -127,8 +156,15 @@ export function resolveLlmConfig(choice: UserAiChoice): LlmConfig {
   if (!choice.provider) return llmConfigFromEnv();
 
   const provider = choice.provider;
-  const apiKey = choice.apiKey || teamKey(provider);
-  if (!apiKey) {
+  const local = isLocalProvider(provider);
+  if (local && !localProvidersAvailable()) {
+    throw new AiSettingsError(
+      `${label(provider)} runs on your own machine, so it only works when the app runs locally. Choose another provider in Settings, then retry the run.`,
+    );
+  }
+  // A local model server usually needs no key.
+  const apiKey = choice.apiKey || teamKey(provider) || (local ? "" : undefined);
+  if (apiKey === undefined) {
     throw new AiSettingsError(
       `Add an API key for ${label(provider)} in Settings, or switch back to the team default, then retry the run.`,
     );
@@ -139,7 +175,13 @@ export function resolveLlmConfig(choice: UserAiChoice): LlmConfig {
   if (!modelSelect || !modelDraft) {
     throw new AiSettingsError(`Choose the ${label(provider)} models to use in Settings, then retry the run.`);
   }
-  return { provider, apiKey, modelSelect, modelDraft, keySource: choice.apiKey ? "user" : "team" };
+  const config: LlmConfig = { provider, apiKey, modelSelect, modelDraft, keySource: choice.apiKey ? "user" : "team" };
+  if (local) {
+    const team = teamLocalSettings();
+    config.baseUrl = choice.baseUrl || team.baseUrl;
+    config.contextTokens = choice.contextTokens || team.contextTokens;
+  }
+  return config;
 }
 
 /** The team default: LLM_PROVIDER with its env key and models. */
@@ -152,13 +194,21 @@ export function llmConfigFromEnv(): LlmConfig {
       `The team AI provider (${label(provider)}) has no models configured: set ${prefix}_MODEL_SELECT and ${prefix}_MODEL_DRAFT, or choose a provider in Settings.`,
     );
   }
-  const apiKey = provider === "lmstudio" ? "" : teamKey(provider);
+  const local = isLocalProvider(provider);
+  const apiKey = teamKey(provider) ?? (local ? "" : undefined);
   if (apiKey === undefined) {
     throw new AiSettingsError(
       `The team AI provider (${label(provider)}) has no API key configured (${key}). Choose a provider and add your own key in Settings.`,
     );
   }
-  return { provider, apiKey, modelSelect: models.select, modelDraft: models.draft, keySource: "team" };
+  return {
+    provider,
+    apiKey,
+    modelSelect: models.select,
+    modelDraft: models.draft,
+    keySource: "team",
+    ...(local ? teamLocalSettings() : {}),
+  };
 }
 
 function positiveIntFromEnv(name: string): number | undefined {
@@ -193,26 +243,30 @@ export function createLlmClient(config: LlmConfig): LlmClient {
         maxOutputTokens: maxOutput ?? 32_000,
       });
 
-    case "lmstudio":
-      // A model on a developer's machine is unreachable from deployed functions.
-      if (process.env.CONTEXT && process.env.CONTEXT !== "dev") {
-        throw new AiSettingsError("LLM_PROVIDER=lmstudio is for local development only");
+    case "lmstudio": {
+      if (!localProvidersAvailable()) {
+        throw new AiSettingsError("LM Studio only works when the app runs locally. Choose another provider in Settings.");
       }
+      const team = teamLocalSettings();
       return createAnthropicClient({
         // LM Studio ignores the key unless "Require Authentication" is enabled.
         client: new Anthropic({
-          baseURL: process.env.LMSTUDIO_BASE_URL || "http://localhost:1234",
-          apiKey: process.env.LMSTUDIO_API_KEY || "lm-studio",
+          baseURL: lmStudioRoot(config.baseUrl || team.baseUrl),
+          apiKey: config.apiKey || "lm-studio",
           timeout: 15 * 60 * 1000,
         }),
         ...models,
         jsonMode: "tool",
         caching: false,
         maxOutputTokens: maxOutput ?? positiveIntFromEnv("LMSTUDIO_MAX_OUTPUT_TOKENS") ?? 4_096,
-        contextTokens: positiveIntFromEnv("LMSTUDIO_CONTEXT_TOKENS") ?? 8_192,
+        contextTokens: config.contextTokens ?? team.contextTokens,
       });
+    }
   }
 }
+
+/** The server root: the SDK adds `/v1/...` itself, so a pasted `.../v1` is trimmed. */
+export const lmStudioRoot = (baseUrl: string) => baseUrl.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
 
 export const llmClientFromEnv = (): LlmClient => createLlmClient(llmConfigFromEnv());
 

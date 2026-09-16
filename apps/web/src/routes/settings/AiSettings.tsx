@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AI_PROVIDERS,
   AI_PROVIDER_LABELS,
+  LOCAL_AI_PROVIDERS,
   type AiProvider,
   type AiProviderSettings,
   type AiSettingsResponse,
@@ -12,7 +13,8 @@ import { getAiSettings, listAiModels, selectAiProvider, testAiProvider, updateAi
 /**
  * Which AI provider drafts your issues. "Team default" is the server's setup;
  * picking a provider shows its key and model settings. A saved key is never
- * shown again, only its last four characters.
+ * shown again, only its last four characters. LM Studio is listed only when
+ * the server runs locally, since it talks to a model on this machine.
  */
 export function AiSettings() {
   const queryClient = useQueryClient();
@@ -48,8 +50,9 @@ export function AiSettings() {
               <span className="muted small"> · {teamLabel(data.team_provider)}</span>
             </span>
           </label>
-          {AI_PROVIDERS.map((provider) => {
-            const p = data.providers.find((x) => x.provider === provider)!;
+          {data.providers.map((p) => {
+            const provider = p.provider;
+            const local = LOCAL_AI_PROVIDERS.includes(provider);
             return (
               <label key={provider} className="choice">
                 <input
@@ -61,8 +64,9 @@ export function AiSettings() {
                 />
                 <span>
                   <strong>{AI_PROVIDER_LABELS[provider]}</strong>
-                  {p.has_key && <span className="badge">your key</span>}
-                  {!p.has_key && p.team_key && <span className="badge">team key</span>}
+                  {local && <span className="badge">local</span>}
+                  {!local && p.has_key && <span className="badge">your key</span>}
+                  {!local && !p.has_key && p.team_key && <span className="badge">team key</span>}
                 </span>
               </label>
             );
@@ -77,29 +81,30 @@ export function AiSettings() {
 }
 
 function teamLabel(provider: string): string {
-  return (AI_PROVIDERS as readonly string[]).includes(provider)
-    ? AI_PROVIDER_LABELS[provider as AiProvider]
-    : provider === "lmstudio"
-      ? "LM Studio"
-      : "not configured";
+  return (AI_PROVIDERS as readonly string[]).includes(provider) ? AI_PROVIDER_LABELS[provider as AiProvider] : "not configured";
 }
 
 /** Remount the form whenever the saved values change, so it starts from them. */
-const panelKey = (p: AiProviderSettings) => [p.provider, p.model_select, p.model_draft, p.key_last4, p.has_key].join("|");
+const panelKey = (p: AiProviderSettings) =>
+  [p.provider, p.model_select, p.model_draft, p.key_last4, p.has_key, p.base_url, p.context_tokens].join("|");
 
 function ProviderPanel({ settings }: { settings: AiProviderSettings }) {
   const queryClient = useQueryClient();
   const provider = settings.provider;
   const label = AI_PROVIDER_LABELS[provider];
+  // LM Studio: a server URL instead of a fixed API, and a key only if it requires authentication.
+  const local = LOCAL_AI_PROVIDERS.includes(provider);
 
   const [modelSelect, setModelSelect] = useState(settings.model_select ?? "");
   const [modelDraft, setModelDraft] = useState(settings.model_draft ?? "");
   const [apiKey, setApiKey] = useState("");
   const [replacingKey, setReplacingKey] = useState(!settings.has_key);
+  const [baseUrl, setBaseUrl] = useState(settings.base_url ?? "");
+  const [contextTokens, setContextTokens] = useState(settings.context_tokens?.toString() ?? "");
 
-  const canListModels = settings.has_key || settings.team_key;
+  const canListModels = local || settings.has_key || settings.team_key;
   const models = useQuery({
-    queryKey: ["settings", "ai", provider, "models", settings.key_last4],
+    queryKey: ["settings", "ai", provider, "models", settings.key_last4, settings.base_url],
     queryFn: () => listAiModels(provider),
     enabled: canListModels,
     staleTime: 5 * 60_000,
@@ -117,6 +122,9 @@ function ProviderPanel({ settings }: { settings: AiProviderSettings }) {
         model_select: modelSelect.trim() || null,
         model_draft: modelDraft.trim() || null,
         ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+        ...(local
+          ? { base_url: baseUrl.trim() || null, context_tokens: contextTokens.trim() ? Number(contextTokens) : null }
+          : {}),
       }),
     onSuccess: saved,
   });
@@ -134,9 +142,13 @@ function ProviderPanel({ settings }: { settings: AiProviderSettings }) {
   const test = useMutation({ mutationFn: () => testAiProvider(provider) });
 
   const dirty =
-    apiKey.trim() !== "" || modelSelect.trim() !== (settings.model_select ?? "") || modelDraft.trim() !== (settings.model_draft ?? "");
+    apiKey.trim() !== "" ||
+    modelSelect.trim() !== (settings.model_select ?? "") ||
+    modelDraft.trim() !== (settings.model_draft ?? "") ||
+    baseUrl.trim() !== (settings.base_url ?? "") ||
+    contextTokens.trim() !== (settings.context_tokens?.toString() ?? "");
   const listId = `models-${provider}`;
-  const noKey = !settings.has_key && !settings.team_key;
+  const noKey = !local && !settings.has_key && !settings.team_key;
 
   return (
     <section className="card">
@@ -153,8 +165,41 @@ function ProviderPanel({ settings }: { settings: AiProviderSettings }) {
           save.mutate();
         }}
       >
+        {local && (
+          <>
+            <label className="field">
+              <span>Server URL</span>
+              <input
+                type="url"
+                spellCheck={false}
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder={`Default: ${settings.default_base_url ?? "http://localhost:1234"}`}
+              />
+              <span className="muted small">
+                Where LM Studio's server is running (Developer tab, version 0.4.1 or later). Only works while this app runs on your machine.
+              </span>
+            </label>
+
+            <label className="field">
+              <span>Context length (tokens)</span>
+              <input
+                type="number"
+                min={1024}
+                step={1}
+                value={contextTokens}
+                onChange={(e) => setContextTokens(e.target.value)}
+                placeholder={`Default: ${settings.default_context_tokens ?? 8192}`}
+              />
+              <span className="muted small">
+                Must match the context length the model is loaded with in LM Studio: prompts are sized to fit it.
+              </span>
+            </label>
+          </>
+        )}
+
         <div className="field">
-          <span>API key</span>
+          <span>{local ? "API token" : "API key"}</span>
           {settings.has_key && !replacingKey ? (
             <div className="row">
               <span>
@@ -174,10 +219,16 @@ function ProviderPanel({ settings }: { settings: AiProviderSettings }) {
               type="password"
               autoComplete="off"
               spellCheck={false}
-              placeholder={settings.team_key ? "Optional: leave blank to use the team key" : `Paste your ${label} API key`}
+              placeholder={
+                local
+                  ? "Optional: only if \"Require Authentication\" is on in LM Studio"
+                  : settings.team_key
+                    ? "Optional: leave blank to use the team key"
+                    : `Paste your ${label} API key`
+              }
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              aria-label={`${label} API key`}
+              aria-label={`${label} ${local ? "API token" : "API key"}`}
             />
           )}
           <span className="muted small">

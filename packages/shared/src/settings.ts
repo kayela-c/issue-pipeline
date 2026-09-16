@@ -6,9 +6,13 @@ import { z } from "zod";
  * provider keeps its own models and, optionally, the user's own API key.
  * Keys are write-only: responses say whether one is saved and show its last
  * four characters, never the key.
+ *
+ * LM Studio is a model server on the user's own machine, so the server only
+ * offers it when it runs locally too (`netlify dev`): `providers` in the
+ * response leaves it out when deployed.
  */
 
-export const AI_PROVIDERS = ["anthropic", "gemini", "grok", "openai", "venice"] as const;
+export const AI_PROVIDERS = ["anthropic", "gemini", "grok", "openai", "venice", "lmstudio"] as const;
 export const aiProviderSchema = z.enum(AI_PROVIDERS);
 export type AiProvider = z.infer<typeof aiProviderSchema>;
 
@@ -18,7 +22,11 @@ export const AI_PROVIDER_LABELS: Record<AiProvider, string> = {
   grok: "Grok (xAI)",
   openai: "OpenAI",
   venice: "Venice",
+  lmstudio: "LM Studio",
 };
+
+/** Providers that run on a URL the user sets (a local model server) rather than a fixed API. */
+export const LOCAL_AI_PROVIDERS: readonly AiProvider[] = ["lmstudio"];
 
 const modelId = z.string().trim().min(1).max(200);
 
@@ -34,6 +42,11 @@ export const aiProviderSettingsSchema = z.object({
   /** The models used when the user has not chosen any; null when there is no default. */
   default_model_select: z.string().nullable(),
   default_model_draft: z.string().nullable(),
+  /** Local providers only (null otherwise): the server URL and model context length, and the defaults used when unset. */
+  base_url: z.string().nullable(),
+  context_tokens: z.number().int().nullable(),
+  default_base_url: z.string().nullable(),
+  default_context_tokens: z.number().int().nullable(),
 });
 export type AiProviderSettings = z.infer<typeof aiProviderSettingsSchema>;
 
@@ -58,6 +71,16 @@ export const updateAiProviderRequestSchema = z.object({
   api_key: z.string().trim().min(8).max(1000).optional(),
   /** Removes the saved key (ignored when api_key is given). */
   clear_key: z.boolean().optional(),
+  /** Local providers only. Omit to keep the saved value; null to use the default. */
+  base_url: z
+    .string()
+    .trim()
+    .max(500)
+    // http(s), a host with an optional port and path, no credentials in the URL.
+    .regex(/^https?:\/\/[^\s/@?#]+(\/[^\s?#]*)?$/i, "Enter an http:// or https:// URL, like http://localhost:1234")
+    .nullable()
+    .optional(),
+  context_tokens: z.number().int().min(1024).max(10_000_000).nullable().optional(),
 });
 export type UpdateAiProviderRequest = z.infer<typeof updateAiProviderRequestSchema>;
 

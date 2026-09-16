@@ -1,6 +1,7 @@
 import {
   AI_PROVIDERS,
   AI_PROVIDER_LABELS,
+  LOCAL_AI_PROVIDERS,
   aiProviderSchema,
   type AiProvider,
   type AiSettingsResponse,
@@ -8,12 +9,27 @@ import {
 import { openCredential, type CredentialSlot } from "../crypto/credentials";
 import { HttpError } from "../http";
 import { getUserAiSettings, type UserAiSettings } from "../db/settings";
-import { AiSettingsError, llmProviderFromEnv, resolveLlmConfig, teamKey, teamModels, type LlmConfig } from "../llm";
+import {
+  AiSettingsError,
+  llmProviderFromEnv,
+  localProvidersAvailable,
+  resolveLlmConfig,
+  teamKey,
+  teamLocalSettings,
+  teamModels,
+  type LlmConfig,
+} from "../llm";
 
-/** A `:provider` route parameter, or a 404. */
+/** Providers this server can offer: local ones (LM Studio) only when it runs locally. */
+export const availableAiProviders = (): AiProvider[] =>
+  localProvidersAvailable() ? [...AI_PROVIDERS] : AI_PROVIDERS.filter((p) => !LOCAL_AI_PROVIDERS.includes(p));
+
+/** A `:provider` route parameter this server offers, or a 404. */
 export function requireAiProvider(value: string | undefined): AiProvider {
   const parsed = aiProviderSchema.safeParse(value);
-  if (!parsed.success) throw new HttpError("not_found", "Unknown AI provider.");
+  if (!parsed.success || !availableAiProviders().includes(parsed.data)) {
+    throw new HttpError("not_found", "Unknown AI provider.");
+  }
   return parsed.data;
 }
 
@@ -29,9 +45,10 @@ export function toAiSettingsDto(settings: UserAiSettings): AiSettingsResponse {
   return {
     provider: settings.provider,
     team_provider: safeTeamProvider(),
-    providers: AI_PROVIDERS.map((provider) => {
+    providers: availableAiProviders().map((provider) => {
       const row = settings.providers.find((p) => p.provider === provider);
       const team = teamModels(provider);
+      const local = LOCAL_AI_PROVIDERS.includes(provider) ? teamLocalSettings() : null;
       return {
         provider,
         model_select: row?.modelSelect ?? null,
@@ -41,6 +58,10 @@ export function toAiSettingsDto(settings: UserAiSettings): AiSettingsResponse {
         team_key: teamKey(provider) !== undefined,
         default_model_select: team.select,
         default_model_draft: team.draft,
+        base_url: local ? (row?.baseUrl ?? null) : null,
+        context_tokens: local ? (row?.contextTokens ?? null) : null,
+        default_base_url: local?.baseUrl ?? null,
+        default_context_tokens: local?.contextTokens ?? null,
       };
     }),
   };
@@ -71,6 +92,8 @@ export async function llmConfigForUser(userId: string): Promise<LlmConfig> {
     modelSelect: row?.modelSelect ?? null,
     modelDraft: row?.modelDraft ?? null,
     apiKey: userApiKey(userId, settings, provider),
+    baseUrl: row?.baseUrl,
+    contextTokens: row?.contextTokens,
   });
 }
 

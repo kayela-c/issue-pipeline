@@ -275,7 +275,7 @@ function charsLeft(contextTokens: number, outputTokens: number, fixedParts: stri
 }
 
 const tooSmall = (contextTokens: number, what: string) =>
-  `The model context window (${contextTokens} tokens) is too small to ${what}. Load the model with a larger context length and update LMSTUDIO_CONTEXT_TOKENS, or shorten the notes.`;
+  `The model context window (${contextTokens} tokens) is too small to ${what}. Load the model with a larger context length and set the same context length for LM Studio in Settings, or shorten the notes.`;
 
 export async function readSnapshot(forge: ForgeClient, owner: string, repo: string, sha: string): Promise<SnapshotData> {
   const fullTree = await forge.getTree(owner, repo, sha);

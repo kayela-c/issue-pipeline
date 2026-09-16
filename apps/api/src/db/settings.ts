@@ -30,6 +30,9 @@ export interface ProviderUpdate {
   modelDraft: string | null;
   /** A sealed key to store, null to remove the saved key, undefined to keep it. */
   apiKey?: { sealed: string; last4: string } | null;
+  /** Local providers only; undefined keeps the saved value, null clears it. */
+  baseUrl?: string | null;
+  contextTokens?: number | null;
 }
 
 export async function upsertUserAiProvider(userId: string, provider: AiProvider, update: ProviderUpdate): Promise<void> {
@@ -37,7 +40,13 @@ export async function upsertUserAiProvider(userId: string, provider: AiProvider,
     update.apiKey === undefined
       ? {}
       : { apiKeyEnc: update.apiKey?.sealed ?? null, apiKeyLast4: update.apiKey?.last4 ?? null };
-  const values = { modelSelect: update.modelSelect, modelDraft: update.modelDraft, ...key };
+  const values = {
+    modelSelect: update.modelSelect,
+    modelDraft: update.modelDraft,
+    ...key,
+    ...(update.baseUrl === undefined ? {} : { baseUrl: update.baseUrl }),
+    ...(update.contextTokens === undefined ? {} : { contextTokens: update.contextTokens }),
+  };
   await getDb()
     .insert(schema.userAiProviders)
     .values({ userId, provider, ...values })

@@ -320,6 +320,9 @@ export const userAiProviders = pgTable(
     modelDraft: text("model_draft"),
     apiKeyEnc: text("api_key_enc"),
     apiKeyLast4: text("api_key_last4"),
+    /** Local providers (LM Studio) only: the model server URL and the context length the model is loaded with. */
+    baseUrl: text("base_url"),
+    contextTokens: integer("context_tokens"),
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),
   },
   (t) => [

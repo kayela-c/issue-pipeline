@@ -50,6 +50,13 @@
       "when": 1789505004606,
       "tag": "0006_github_repos",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789578095635,
+      "tag": "0007_lmstudio_settings",
+      "breakpoints": true
     }
   ]
 }
